@@ -1,0 +1,41 @@
+# Met à jour data/prices.json avec le cours de clôture des ETF suivis.
+# Tourne chaque soir de semaine après la clôture d'Euronext Paris (17 h 30),
+# et peut être lancé à la main : onglet Actions → « Cours des ETF » → Run workflow.
+name: Cours des ETF
+
+on:
+  schedule:
+    - cron: '47 17 * * 1-5'   # 17 h 47 UTC = 19 h 47 (heure d'été) / 18 h 47 (heure d'hiver) à Paris
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Récupérer les cours
+        run: node tools/fetch-prices.js
+
+      - name: Publier si changement
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prices.json
+          if git diff --cached --quiet; then
+            echo "Pas de nouveau cours."
+          else
+            git commit -m "Cours du $(date -u +%d/%m/%Y)"
+            git push
+          fi

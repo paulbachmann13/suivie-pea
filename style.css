@@ -19,6 +19,7 @@
   --accent-ink: #ffffff;
   --series-invested: #3987e5;
   --series-gains: #199e70;
+  --series-value: #199e70;
   --good: #0ca30c;
   --bad: #e66767;
   --radius: 16px;
@@ -41,11 +42,15 @@
   --accent: #2a78d6;
   --series-invested: #2a78d6;
   --series-gains: #1baf7a;
+  --series-value: #1baf7a;
   --good: #006300;
   --bad: #d03b3b;
 }
 
 * { box-sizing: border-box; }
+
+/* L'attribut hidden doit toujours l'emporter sur les display: flex/grid ci-dessous */
+[hidden] { display: none !important; }
 
 html { -webkit-text-size-adjust: 100%; }
 
@@ -128,7 +133,7 @@ h2 { font-size: 18px; margin: 28px 0 8px; }
 
 /* ---------- Formulaires ---------- */
 .form label { display: block; color: var(--ink-2); font-size: 14px; }
-.form label + label, .form .row + label, .form label + .row { margin-top: 12px; }
+.form label + label, .form .row + label, .form label + .row, .form datalist + .row { margin-top: 12px; }
 input[type="text"], input[type="date"] {
   display: block;
   width: 100%;
@@ -146,6 +151,8 @@ input[type="text"], input[type="date"] {
 }
 input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .row { display: flex; gap: 12px; }
+.form .row > label { margin-top: 0; } /* champs côte à côte alignés */
+.form .row { align-items: flex-end; }
 .row > * { flex: 1; min-width: 0; }
 .form .row .btn { margin-top: 16px; }
 
@@ -221,7 +228,12 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 2px; color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 600;
 }
-.tabbar a span { font-size: 22px; line-height: 1; }
+/* Icônes SVG (et non des caractères : iOS les affichait en emoji couleur) */
+.tabbar a svg {
+  width: 24px; height: 24px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .tabbar a.active { color: var(--accent); }
 
 /* ---------- Fenêtre modale ---------- */
@@ -245,3 +257,42 @@ dialog h2 { margin-top: 0; }
   padding: 10px 16px; border-radius: 12px; font-weight: 600; font-size: 14px;
   max-width: calc(100% - 32px);
 }
+
+/* ---------- Bandeaux (sauvegarde, mise à jour) ---------- */
+.banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius); padding: 10px 12px 10px 14px; margin-bottom: 12px;
+}
+.banner p { margin: 0; font-size: 14px; color: var(--ink-2); }
+.banner .btn { flex: none; }
+.banner-update {
+  position: fixed; z-index: 25; left: 12px; right: 12px;
+  top: calc(env(safe-area-inset-top) + 8px);
+  max-width: 616px; margin: 0 auto;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+}
+
+/* ---------- Calculateur « prochain achat » ---------- */
+.card-title { margin: 0 0 12px; }
+.plan-result { margin: 16px 0 0; font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.plan-result:empty { display: none; }
+#plan-form > .btn, #sim-form > .btn, #deposit-form > .btn { margin-top: 16px; }
+
+/* ---------- Versements ---------- */
+#deposit-list:not(:empty) { margin-top: 16px; }
+.deposit {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 0 6px 2px; border-top: 1px solid var(--border);
+  color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.deposit span { color: var(--ink-2); font-size: 14px; }
+.deposit b { margin-left: auto; font-weight: 600; }
+.deposit .btn { min-height: 44px; width: 44px; padding: 0; flex: none; }
+
+/* ---------- Légende des graphiques ---------- */
+.legend { display: flex; gap: 16px; padding: 0 8px 8px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; }
+.key-line { display: inline-block; width: 14px; height: 2px; border-radius: 1px; margin-right: 6px; }
+.key-value { background: var(--series-value); }

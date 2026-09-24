@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -250,6 +250,112 @@ const Calc = {
       progress: Math.min(invested / cap, 1),
     };
   },
+
+  /**
+   * Versements et cash : le plafond PEA porte sur l'argent versé sur le
+   * compte, pas sur les achats. Sans versement saisi, on se rabat sur les
+   * achats (frais inclus).
+   */
+  deposits(deposits, purchases) {
+    const spent = purchases.reduce((s, p) => s + Calc.purchaseCost(p), 0);
+    const total = deposits.reduce((s, d) => s + d.amount, 0);
+    const hasDeposits = deposits.length > 0;
+    return {
+      hasDeposits,
+      total,
+      spent,
+      base: hasDeposits ? total : spent, // montant compté pour le plafond
+      cash: hasDeposits ? total - spent : null,
+    };
+  },
+
+  /**
+   * Calculateur « prochain achat » : nombre de parts entières achetables
+   * avec un montant donné, frais de courtage déduits.
+   */
+  buyPlan(amount, price, fees = 0) {
+    if (!(amount > 0) || !(price > 0) || fees < 0) return null;
+    const qty = Math.max(Math.floor((amount - fees) / price + 1e-9), 0);
+    const cost = qty > 0 ? qty * price + fees : 0;
+    return { qty, cost, left: amount - cost };
+  },
+
+  /**
+   * Taux de rendement interne annualisé (TRI / XIRR).
+   * @param flows [{date: 'AAAA-MM-JJ', amount}] — négatif = argent investi,
+   *              positif = argent récupéré (ou valeur actuelle).
+   * @returns taux annuel (0.07 = 7 %) ou null si incalculable.
+   * Résolution par dichotomie : lente mais toujours stable.
+   */
+  xirr(flows) {
+    if (flows.length < 2) return null;
+    const t0 = Dates.parse(flows[0].date);
+    const pts = flows.map((f) => ({ t: Dates.daysBetween(t0, Dates.parse(f.date)) / 365, a: f.amount }));
+    if (!pts.some((p) => p.a < 0) || !pts.some((p) => p.a > 0)) return null;
+    const npv = (r) => pts.reduce((s, p) => s + p.a / Math.pow(1 + r, p.t), 0);
+    let lo = -0.9999, hi = 10;
+    let flo = npv(lo), fhi = npv(hi);
+    if (!Number.isFinite(flo) || !Number.isFinite(fhi) || flo * fhi > 0) return null;
+    for (let k = 0; k < 200; k++) {
+      const mid = (lo + hi) / 2;
+      const fm = npv(mid);
+      if (Math.abs(fm) < 1e-9 || hi - lo < 1e-10) return mid;
+      if (fm * flo < 0) { hi = mid; fhi = fm; } else { lo = mid; flo = fm; }
+    }
+    return (lo + hi) / 2;
+  },
+
+  /** TRI du portefeuille : achats (sorties) + valeur actuelle (entrée) à la date du jour. */
+  portfolioXirr(purchases, value, todayISO = Dates.today()) {
+    if (!purchases.length || !(value > 0)) return null;
+    const flows = purchases
+      .map((p) => ({ date: p.date, amount: -Calc.purchaseCost(p) }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const days = Dates.daysBetween(Dates.parse(flows[0].date), Dates.parse(todayISO));
+    return { rate: Calc.xirr([...flows, { date: todayISO, amount: value }]), days };
+  },
+
+  /**
+   * Série « valeur du portefeuille vs versements » à partir de l'historique
+   * des cours. histories = { TICKER: [['AAAA-MM-JJ', clôture], ...] } triés.
+   * Un point par jour de cotation depuis le premier achat. Renvoie [] si un
+   * titre détenu n'a pas d'historique.
+   */
+  valueSeries(purchases, histories) {
+    if (!purchases.length) return [];
+    const sorted = purchases.slice().sort((a, b) => a.date.localeCompare(b.date));
+    const tickers = [...new Set(sorted.map((p) => Calc.normTicker(p.ticker)))];
+    if (tickers.some((t) => !histories[t] || !histories[t].length)) return [];
+    const start = sorted[0].date;
+    const dates = [...new Set(tickers.flatMap((t) => histories[t].map((h) => h[0])))]
+      .filter((d) => d >= start)
+      .sort();
+
+    const out = [];
+    const idx = Object.fromEntries(tickers.map((t) => [t, -1]));
+    const qty = Object.fromEntries(tickers.map((t) => [t, 0]));
+    let pi = 0;
+    let invested = 0;
+    for (const d of dates) {
+      while (pi < sorted.length && sorted[pi].date <= d) {
+        const p = sorted[pi++];
+        qty[Calc.normTicker(p.ticker)] += p.qty;
+        invested += Calc.purchaseCost(p);
+      }
+      let value = 0;
+      let ok = true;
+      for (const t of tickers) {
+        const h = histories[t];
+        while (idx[t] + 1 < h.length && h[idx[t] + 1][0] <= d) idx[t]++;
+        if (qty[t] > 0) {
+          if (idx[t] < 0) { ok = false; break; }
+          value += qty[t] * h[idx[t]][1];
+        }
+      }
+      if (ok) out.push({ date: d, invested, value });
+    }
+    return out;
+  },
 };
 
 /* ==========================================================================
@@ -263,8 +369,11 @@ const Store = {
       version: 1,
       openingDate: Dates.today(),
       purchases: [],            // [{id, date, ticker, qty, price, fees}]
+      deposits: [],             // versements sur le PEA [{id, date, amount}]
       prices: {},               // { TICKER: {price, date, source} }
       sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2 },
+      plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
+      lastExport: null,         // date du dernier export JSON
       theme: 'dark',
     };
   },
@@ -308,6 +417,11 @@ const Store = {
       }
       return clean;
     });
+    const deposits = (Array.isArray(data.deposits) ? data.deposits : []).map((d, idx) => {
+      const clean = { id: String(d.id || Store.newId()), date: String(d.date), amount: Number(d.amount) };
+      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0)) throw new Error(`Versement n°${idx + 1} invalide.`);
+      return clean;
+    });
     const prices = {};
     for (const [t, q] of Object.entries(data.prices || {})) {
       if (q && Number(q.price) > 0) prices[Calc.normTicker(t)] = { price: Number(q.price), date: String(q.date || ''), source: q.source || 'manuel' };
@@ -316,8 +430,11 @@ const Store = {
       version: 1,
       openingDate: Dates.isValidISO(data.openingDate) ? data.openingDate : def.openingDate,
       purchases,
+      deposits,
       prices,
       sim: { ...def.sim, ...(data.sim || {}) },
+      plan: { ...def.plan, ...(data.plan || {}) },
+      lastExport: Dates.isValidISO(data.lastExport) ? data.lastExport : null,
       theme: data.theme === 'light' ? 'light' : 'dark',
     };
   },
@@ -332,41 +449,102 @@ const Store = {
 /* ==========================================================================
    4. FOURNISSEURS DE COURS
    --------------------------------------------------------------------------
-   Pour brancher une API plus tard : créer un objet respectant l'interface
-     { id, label, auto: true, async getQuote(ticker) → {price, date} | null }
-   l'ajouter à PriceProviders puis changer ACTIVE_PROVIDER.
-   Le bouton « Actualiser les cours » apparaît automatiquement si auto = true.
+   Interface d'un fournisseur :
+     { id, label, auto, async load() → { quotes: {TICKER: {price, date}},
+                                          histories: {TICKER: [[date, clôture], ...]} } | null }
+   Le fournisseur actif est ACTIVE_PROVIDER. La saisie manuelle reste
+   toujours possible et prime sur un cours automatique plus ancien.
    ========================================================================== */
+
+/**
+ * Où lire data/prices.json (mis à jour chaque soir de semaine par la
+ * GitHub Action .github/workflows/prices.yml).
+ * Sur GitHub Pages, on lit d'abord le fichier brut du dépôt (à jour dès le
+ * commit, sans attendre la republication du site), puis la copie du site.
+ */
+function priceUrls(loc = (typeof location !== 'undefined' ? location : null)) {
+  const urls = [];
+  if (loc && /\.github\.io$/.test(loc.hostname)) {
+    const owner = loc.hostname.split('.')[0];
+    const repo = loc.pathname.split('/').filter(Boolean)[0];
+    if (repo) urls.push(`https://raw.githubusercontent.com/${owner}/${repo}/main/data/prices.json`);
+  }
+  urls.push('data/prices.json');
+  return urls;
+}
+
+/** Valide le contenu de prices.json et le met au format attendu par l'appli. */
+function parsePricesFile(json) {
+  if (!json || typeof json !== 'object' || !json.quotes) return null;
+  const quotes = {};
+  const histories = {};
+  for (const [t, q] of Object.entries(json.quotes)) {
+    const ticker = Calc.normTicker(t);
+    if (q && Number(q.price) > 0 && Dates.isValidISO(q.date)) quotes[ticker] = { price: Number(q.price), date: q.date };
+    if (q && Array.isArray(q.history)) {
+      histories[ticker] = q.history
+        .filter((h) => Array.isArray(h) && Dates.isValidISO(h[0]) && Number(h[1]) > 0)
+        .map((h) => [h[0], Number(h[1])])
+        .sort((a, b) => a[0].localeCompare(b[0]));
+    }
+  }
+  return { quotes, histories, updatedAt: json.updatedAt || null };
+}
+
 const PriceProviders = {
   manual: {
     id: 'manuel',
     label: 'Saisie manuelle',
     auto: false,
-    async getQuote() { return null; },
+    async load() { return null; },
   },
 
-  /* Exemple (non actif) :
-  monApi: {
-    id: 'mon-api',
-    label: 'Mon API de cours',
+  /** Cours de clôture publiés par la GitHub Action dans data/prices.json. */
+  githubAction: {
+    id: 'auto',
+    label: 'Automatique (clôture Euronext)',
     auto: true,
-    async getQuote(ticker) {
-      const r = await fetch(`https://exemple.com/quote?symbol=${encodeURIComponent(ticker + '.PA')}`);
-      if (!r.ok) return null;
-      const j = await r.json();
-      return { price: j.price, date: Dates.today() };
+    async load() {
+      for (const url of priceUrls()) {
+        try {
+          const r = await fetch(url, { cache: 'no-store' });
+          if (!r.ok) continue;
+          const parsed = parsePricesFile(await r.json());
+          if (parsed) return parsed;
+        } catch (e) { /* hors ligne ou fichier absent : on essaie l'URL suivante */ }
+      }
+      return null;
     },
   },
-  */
 };
-const ACTIVE_PROVIDER = PriceProviders.manual;
+const ACTIVE_PROVIDER = PriceProviders.githubAction;
+
+/**
+ * Fusionne des cours automatiques dans les cours enregistrés.
+ * Un cours auto remplace le cours stocké s'il est plus récent, ou si le cours
+ * stocké vient lui-même du fournisseur auto. Un cours saisi à la main le même
+ * jour ou plus tard est conservé.
+ * @returns nombre de cours mis à jour
+ */
+function mergeQuotes(prices, quotes, source = 'auto') {
+  let n = 0;
+  for (const [t, q] of Object.entries(quotes)) {
+    const cur = prices[t];
+    if (!cur || q.date > cur.date || (cur.source === source && (q.date !== cur.date || q.price !== cur.price))) {
+      prices[t] = { price: q.price, date: q.date, source };
+      n++;
+    }
+  }
+  return n;
+}
 
 /* ==========================================================================
    5. GRAPHIQUES SVG MAISON
    --------------------------------------------------------------------------
    drawChart(container, { xs, series, xLabel, yFormat, step, stacked })
      xs      : valeurs numériques de l'axe X (timestamps, mois…)
-     series  : [{ name, color (variable CSS), values: [...] , area: bool }]
+     series  : [{ name, color (variable CSS), values: [...], area: bool, step: bool }]
+     step    : tracé en escalier pour toutes les séries (sinon par série)
      stacked : les aires sont empilées (valeur affichée = somme)
    Survol / toucher : ligne verticale + infobulle listant toutes les séries.
    ========================================================================== */
@@ -438,19 +616,19 @@ function drawChart(container, opts) {
   }
 
   // Chemins : ligne (2px) + aire translucide
-  const pathFor = (vals) => {
+  const pathFor = (vals, st) => {
     let d = '';
     vals.forEach((v, i) => {
       const X = sx(xs[i]); const Y = sy(v);
       if (i === 0) d += `M${X},${Y}`;
-      else if (step) d += `H${X}V${Y}`;
+      else if (st) d += `H${X}V${Y}`;
       else d += `L${X},${Y}`;
     });
     if (xs.length === 1) d += `H${W - m.right}`; // un seul point : ligne horizontale
     return d;
   };
   series.forEach((s, si) => {
-    const line = pathFor(shown[si]);
+    const line = pathFor(shown[si], step || s.step);
     if (s.area) {
       const lower = si > 0 && stacked ? shown[si - 1] : null;
       let d = line;
@@ -519,21 +697,57 @@ function drawChart(container, opts) {
 const App = {
   state: null,
 
+  histories: {},     // historiques de cours (pas dans l'export : ce sont des données publiques)
+  lastQuoteFetch: 0,
+
   init() {
     App.state = Store.load();
+    App.histories = App.loadHistories();
     App.applyTheme();
     App.bindNavigation();
     App.bindPurchases();
+    App.bindPlanner();
     App.bindSimulator();
     App.bindPea();
+    App.bindBanners();
     App.renderAll();
     window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
     document.getElementById('app-version').textContent = `Suivi PEA v${APP_VERSION} — cours : ${ACTIVE_PROVIDER.label.toLowerCase()}`;
 
-    // Service worker : mode hors ligne
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW non enregistré', e));
-    }
+    // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)
+    App.refreshQuotes({ silent: true });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && Date.now() - App.lastQuoteFetch > 30 * 60 * 1000) App.refreshQuotes({ silent: true });
+    });
+
+    App.registerServiceWorker();
+  },
+
+  /* ---------- Service worker : hors ligne + avis de mise à jour ---------- */
+  registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    // Une page déjà contrôlée qui change de contrôleur = nouvelle version installée
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController) document.getElementById('update-banner').hidden = false;
+    });
+    navigator.serviceWorker.register('sw.js')
+      .then((reg) => reg.update())
+      .catch((e) => console.warn('SW non enregistré', e));
+  },
+
+  bindBanners() {
+    document.getElementById('btn-reload').addEventListener('click', () => location.reload());
+    document.getElementById('btn-backup-now').addEventListener('click', App.exportJSON);
+  },
+
+  /* ---------- Historique des cours (cache local pour le hors ligne) ---------- */
+  HISTORY_KEY: 'suivi-pea:histories',
+  loadHistories() {
+    try { return JSON.parse(localStorage.getItem(App.HISTORY_KEY)) || {}; } catch (e) { return {}; }
+  },
+  saveHistories() {
+    try { localStorage.setItem(App.HISTORY_KEY, JSON.stringify(App.histories)); } catch (e) { /* quota : tant pis */ }
   },
 
   persist() { Store.save(App.state); },
@@ -566,6 +780,7 @@ const App = {
 
   renderAll() {
     App.renderDashboard();
+    App.renderPlanner();
     App.renderPurchases();
     App.renderSimulator();
     App.renderPea();
@@ -592,6 +807,44 @@ const App = {
     pvEur.className = 'kpi-value ' + cls(pf.pv);
     document.getElementById('kpi-pru').textContent = pf.pru !== null ? Fmt.unitPrice(pf.pru) : (pf.positions.length ? 'voir titres' : '—');
     document.getElementById('kpi-qty').textContent = Fmt.num(pf.qty);
+
+    // Rendement annualisé (TRI) : n'a de sens qu'après quelques semaines
+    const xr = Calc.portfolioXirr(App.state.purchases, pf.value);
+    const xEl = document.getElementById('kpi-xirr');
+    const xHint = document.getElementById('kpi-xirr-hint');
+    if (!xr) {
+      xEl.textContent = '—'; xEl.className = 'kpi-value'; xHint.textContent = '';
+    } else if (xr.days < 30 || xr.rate === null) {
+      xEl.textContent = '—'; xEl.className = 'kpi-value';
+      xHint.textContent = 'Disponible après 1 mois';
+    } else {
+      xEl.textContent = Fmt.signedPct(xr.rate);
+      xEl.className = 'kpi-value ' + cls(xr.rate);
+      xHint.textContent = xr.days < 365 ? 'par an · moins d\'1 an de recul' : 'par an';
+    }
+
+    // Cash disponible = versements − achats
+    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const cashEl = document.getElementById('kpi-cash');
+    const cashHint = document.getElementById('kpi-cash-hint');
+    if (dep.hasDeposits) {
+      cashEl.textContent = Fmt.eur(dep.cash);
+      cashEl.className = 'kpi-value ' + (dep.cash < 0 ? 'neg' : '');
+      cashHint.textContent = dep.cash < 0 ? 'Achats > versements : un versement manque ?' : '';
+    } else {
+      cashEl.textContent = '—';
+      cashEl.className = 'kpi-value';
+      cashHint.textContent = 'Saisissez vos versements (onglet PEA)';
+    }
+
+    // Rappel de sauvegarde
+    const banner = document.getElementById('backup-banner');
+    const last = App.state.lastExport;
+    const age = last ? Dates.daysBetween(Dates.parse(last), new Date()) : Infinity;
+    banner.hidden = !(App.state.purchases.length && age > 30);
+    document.getElementById('backup-text').textContent = last
+      ? `Dernière sauvegarde il y a ${age} jours.`
+      : 'Aucune sauvegarde de vos données pour l\'instant.';
 
     const warn = document.getElementById('kpi-warning');
     warn.hidden = !pf.missingQuotes.length;
@@ -634,9 +887,12 @@ const App = {
       card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pru);
       card.querySelector('[data-f=invested]').textContent = Fmt.eur(pos.invested);
       card.querySelector('[data-f=value]').textContent = Fmt.eur(pos.value);
-      card.querySelector('[data-f=quote]').textContent = pos.hasQuote
-        ? `Cours mis à jour le ${Fmt.date(pos.quoteDate)}`
-        : `Aucun cours saisi (dernier prix d'achat : ${Fmt.unitPrice(pos.lastPrice)})`;
+      const src = (App.state.prices[pos.ticker] || {}).source;
+      card.querySelector('[data-f=quote]').textContent = !pos.hasQuote
+        ? `Aucun cours (dernier prix d'achat : ${Fmt.unitPrice(pos.lastPrice)})`
+        : src === 'auto'
+          ? `Cours de clôture du ${Fmt.date(pos.quoteDate)} (automatique)`
+          : `Cours saisi le ${Fmt.date(pos.quoteDate)}`;
       const input = card.querySelector('input');
       input.value = pos.hasQuote ? Fmt.input(pos.currentPrice) : '';
       input.placeholder = Fmt.input(pos.lastPrice);
@@ -651,7 +907,7 @@ const App = {
       const btn = document.createElement('button');
       btn.className = 'btn';
       btn.textContent = '↻ Actualiser les cours';
-      btn.addEventListener('click', App.refreshQuotes);
+      btn.addEventListener('click', () => App.refreshQuotes({ silent: false }));
       box.appendChild(btn);
     }
   },
@@ -671,24 +927,53 @@ const App = {
     App.toast('Cours enregistré');
   },
 
-  /** Actualise tous les cours via le fournisseur actif (API future). */
-  async refreshQuotes() {
-    const tickers = Calc.portfolio(App.state.purchases).positions.map((p) => p.ticker);
-    let ok = 0;
-    for (const t of tickers) {
-      try {
-        const q = await ACTIVE_PROVIDER.getQuote(t);
-        if (q && q.price > 0) { App.state.prices[t] = { ...q, source: ACTIVE_PROVIDER.id }; ok++; }
-      } catch (e) { console.warn('Cours indisponible pour', t, e); }
+  /** Charge les cours du fournisseur actif et les fusionne avec les cours saisis. */
+  async refreshQuotes({ silent = false } = {}) {
+    if (!ACTIVE_PROVIDER.auto) return;
+    App.lastQuoteFetch = Date.now();
+    let data = null;
+    try { data = await ACTIVE_PROVIDER.load(); } catch (e) { console.warn('Cours indisponibles', e); }
+    if (!data) {
+      if (!silent) App.toast('Cours indisponibles (hors ligne ?)');
+      return;
     }
-    App.persist();
+    const n = mergeQuotes(App.state.prices, data.quotes, ACTIVE_PROVIDER.id);
+    App.histories = data.histories;
+    App.saveHistories();
+    if (n) App.persist();
     App.renderAll();
-    App.toast(`${ok}/${tickers.length} cours actualisé(s)`);
+    if (!silent) App.toast(n ? `${n} cours mis à jour` : 'Cours déjà à jour');
   },
 
   renderCumulChart() {
     const el = document.getElementById('chart-cumul');
     if (el.offsetParent === null) return; // vue masquée
+
+    // Avec l'historique des cours : valeur réelle vs versements, jour par jour
+    const vs = Calc.valueSeries(App.state.purchases, App.histories);
+    document.getElementById('legend-value').hidden = vs.length < 2;
+    document.getElementById('chart-cumul-legend').hidden = vs.length < 2;
+    document.getElementById('chart-cumul-title').textContent = vs.length >= 2 ? 'Valeur et versements' : 'Versements cumulés';
+    if (vs.length >= 2) {
+      drawChart(el, {
+        xs: vs.map((p) => Dates.parse(p.date).getTime()),
+        series: [
+          { name: 'Versé', color: '--series-invested', values: vs.map((p) => p.invested), area: true, step: true },
+          { name: 'Valeur', color: '--series-value', values: vs.map((p) => p.value) },
+        ],
+        xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+        tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+        tooltipRows: (i) => [
+          { name: 'Valeur', color: '--series-value', value: Fmt.eur(vs[i].value) },
+          { name: 'Versé', color: '--series-invested', value: Fmt.eur(vs[i].invested) },
+          { name: 'Plus-value', value: Fmt.signedEur(vs[i].value - vs[i].invested) },
+        ],
+        yFormat: Fmt.eur,
+      });
+      return;
+    }
+
+    // Sinon : versements cumulés seuls
     const pts = Calc.cumulativeSeries(App.state.purchases);
     drawChart(el, {
       xs: pts.map((p) => Dates.parse(p.date).getTime()),
@@ -714,15 +999,26 @@ const App = {
     });
   },
 
-  openPurchase(p) {
-    const form = document.getElementById('purchase-form');
+  /** Ticker par défaut : celui du dernier achat, sinon DCAM. */
+  defaultTicker() {
     const last = App.state.purchases.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
+    return last ? last.ticker : 'DCAM';
+  },
+
+  /**
+   * Ouvre la fenêtre d'achat.
+   * @param p        achat existant à modifier (avec id) — ou rien pour un nouvel achat
+   * @param prefill  valeurs pré-remplies d'un nouvel achat (calculateur)
+   */
+  openPurchase(p, prefill = null) {
+    const form = document.getElementById('purchase-form');
+    const v = p || prefill || {};
     form.id.value = p ? p.id : '';
-    form.date.value = p ? p.date : Dates.today();
-    form.ticker.value = p ? p.ticker : (last ? last.ticker : 'DCAM');
-    form.qty.value = p ? Fmt.input(p.qty) : '';
-    form.price.value = p ? Fmt.input(p.price) : '';
-    form.fees.value = p ? Fmt.input(p.fees) : '';
+    form.date.value = v.date || Dates.today();
+    form.ticker.value = v.ticker || App.defaultTicker();
+    form.qty.value = Fmt.input(v.qty);
+    form.price.value = Fmt.input(v.price);
+    form.fees.value = Fmt.input(v.fees);
     document.getElementById('purchase-dialog-title').textContent = p ? "Modifier l'achat" : 'Nouvel achat';
     document.getElementById('purchase-error').hidden = true;
     App.updatePurchaseTotal();
@@ -800,11 +1096,74 @@ const App = {
     }
   },
 
+  /* ---------- Calculateur « prochain achat » ---------- */
+  bindPlanner() {
+    const form = document.getElementById('plan-form');
+    form.amount.value = Fmt.input(App.state.plan.amount);
+    form.fees.value = App.state.plan.fees ? Fmt.input(App.state.plan.fees) : '';
+    form.addEventListener('submit', (e) => e.preventDefault());
+    form.addEventListener('input', (e) => {
+      if (e.target.name === 'price') form.price.dataset.touched = '1';
+      const amount = Calc.parseNumber(form.amount.value);
+      const fees = Calc.parseNumber(form.fees.value, true);
+      if (amount > 0 && fees >= 0) { App.state.plan = { amount, fees }; App.persist(); }
+      App.renderPlanner();
+    });
+    document.getElementById('btn-plan-save').addEventListener('click', () => {
+      const r = App.planResult();
+      if (!r) return;
+      App.openPurchase(null, { ticker: App.defaultTicker(), qty: r.qty, price: r.price, fees: r.fees });
+    });
+  },
+
+  /** Lit le calculateur : cours saisi, sinon dernier cours connu du titre. */
+  planResult() {
+    const form = document.getElementById('plan-form');
+    const ticker = App.defaultTicker();
+    const known = App.state.prices[ticker];
+    if (!form.price.dataset.touched || form.price.value === '') {
+      form.price.value = known ? Fmt.input(known.price) : '';
+    }
+    const amount = Calc.parseNumber(form.amount.value);
+    const price = Calc.parseNumber(form.price.value);
+    const fees = Calc.parseNumber(form.fees.value, true);
+    const plan = Calc.buyPlan(amount, price, fees);
+    return plan ? { ...plan, amount, price, fees, ticker } : null;
+  },
+
+  renderPlanner() {
+    const r = App.planResult();
+    const res = document.getElementById('plan-result');
+    const left = document.getElementById('plan-left');
+    const btn = document.getElementById('btn-plan-save');
+    if (!r) {
+      res.textContent = '';
+      left.textContent = 'Indiquez un montant et le cours actuel.';
+      btn.disabled = true;
+      return;
+    }
+    if (r.qty === 0) {
+      res.textContent = '0 part';
+      left.textContent = `Montant insuffisant pour une part à ${Fmt.unitPrice(r.price)}${r.fees ? ' frais compris' : ''}.`;
+      btn.disabled = true;
+      return;
+    }
+    res.textContent = `${Fmt.num(r.qty)} ${r.ticker} × ${Fmt.unitPrice(r.price)}`;
+    left.textContent = `Coût ${Fmt.eur(r.cost)}${r.fees ? ' frais compris' : ''} · reste ${Fmt.eur(r.left)} en cash.`;
+    btn.disabled = false;
+  },
+
   /* ---------- Simulateur ---------- */
   bindSimulator() {
     const form = document.getElementById('sim-form');
     App.bindSimulatorValues();
     form.addEventListener('submit', (e) => e.preventDefault());
+    document.getElementById('btn-sim-from-pf').addEventListener('click', () => {
+      const value = Calc.portfolio(App.state.purchases, App.state.prices).value;
+      form.initial.value = Fmt.input(Math.round(value * 100) / 100);
+      form.dispatchEvent(new Event('input'));
+      App.toast(value > 0 ? 'Capital de départ = valeur actuelle' : 'Portefeuille vide pour l\'instant');
+    });
     form.addEventListener('input', App.debounce(() => {
       const v = {
         monthly: Calc.parseNumber(form.monthly.value, true),
@@ -877,6 +1236,26 @@ const App = {
       App.renderPea();
     });
 
+    // Versements
+    const df = document.getElementById('deposit-form');
+    df.date.value = Dates.today();
+    df.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const amount = Calc.parseNumber(df.amount.value);
+      const err = document.getElementById('deposit-error');
+      if (!Dates.isValidISO(df.date.value) || !(amount > 0)) {
+        err.textContent = 'Date ou montant invalide.';
+        err.hidden = false;
+        return;
+      }
+      err.hidden = true;
+      App.state.deposits.push({ id: Store.newId(), date: df.date.value, amount });
+      App.persist();
+      df.amount.value = '';
+      App.renderAll();
+      App.toast('Versement ajouté');
+    });
+
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
     document.getElementById('import-file').addEventListener('change', App.importJSON);
     document.getElementById('btn-theme').addEventListener('click', () => {
@@ -907,14 +1286,48 @@ const App = {
       : `Échéance le ${Fmt.date(c.targetISO)} (${Fmt.num(c.daysLeft)} jours). ${Fmt.pct(c.progress)} du chemin.`;
     document.getElementById('pea-gauge-time').style.width = (c.progress * 100) + '%';
 
-    const invested = Calc.portfolio(App.state.purchases).invested;
-    const ce = Calc.ceiling(invested);
+    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const ce = Calc.ceiling(dep.base);
+    document.getElementById('pea-ceiling-source').textContent = dep.hasDeposits
+      ? 'Calculé sur vos versements.'
+      : 'Estimé à partir de vos achats (frais inclus) : ajoutez vos versements pour un calcul exact.';
+    App.renderDeposits();
     document.getElementById('pea-ceiling').textContent = `${Fmt.eur0(ce.used)} / ${Fmt.eur0(PEA_CEILING)}`;
     document.getElementById('pea-gauge-ceiling').style.width = Math.max(ce.progress * 100, ce.used > 0 ? 1 : 0) + '%';
     document.getElementById('pea-ceiling-left').textContent = `Encore ${Fmt.eur0(ce.remaining)} de versements possibles (${Fmt.pct(ce.progress)} utilisé).`;
   },
 
+  renderDeposits() {
+    const list = document.getElementById('deposit-list');
+    list.replaceChildren();
+    const sorted = App.state.deposits.slice().sort((a, b) => b.date.localeCompare(a.date));
+    for (const d of sorted) {
+      const row = document.createElement('div');
+      row.className = 'deposit';
+      const date = document.createElement('span');
+      date.textContent = Fmt.date(d.date);
+      const amount = document.createElement('b');
+      amount.textContent = Fmt.eur(d.amount);
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn btn-danger';
+      del.setAttribute('aria-label', `Supprimer le versement du ${Fmt.date(d.date)}`);
+      del.textContent = '✕';
+      del.addEventListener('click', () => {
+        if (!confirm(`Supprimer le versement de ${Fmt.eur(d.amount)} du ${Fmt.date(d.date)} ?`)) return;
+        App.state.deposits = App.state.deposits.filter((x) => x.id !== d.id);
+        App.persist();
+        App.renderAll();
+      });
+      row.append(date, amount, del);
+      list.appendChild(row);
+    }
+  },
+
   exportJSON() {
+    App.state.lastExport = Dates.today();
+    App.persist();
+    App.renderDashboard();
     const blob = new Blob([JSON.stringify(App.state, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -962,5 +1375,5 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', App.init);
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING };
+  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, parsePricesFile, mergeQuotes, priceUrls };
 }
