@@ -44,8 +44,9 @@ node --test tests/*.test.js
 
 ## Mettre à jour l'appli
 
-Après une modification, incrémentez `CACHE` dans `sw.js` (`suivi-pea-v2`…)
-pour que les téléphones récupèrent la nouvelle version.
+Après une modification, incrémentez la version dans `app.js` (`APP_VERSION`)
+**et** dans `sw.js` (`VERSION`) : les téléphones récupèrent alors la nouvelle version,
+et le numéro affiché en haut de l'appli permet de vérifier qu'elle est à jour.
 
 ## Cours automatiques
 

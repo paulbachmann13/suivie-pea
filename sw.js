@@ -2,9 +2,10 @@
    Suivi PEA — service worker
    Stratégie « stale-while-revalidate » : l'appli s'ouvre instantanément
    depuis le cache (hors ligne compris) et se met à jour en arrière-plan.
-   Pensez à incrémenter CACHE à chaque modification des fichiers.
+   Pensez à incrémenter VERSION (ici et dans app.js) à chaque modification.
    ========================================================================== */
-const CACHE = 'suivi-pea-v2';
+const VERSION = '1.1.1'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
+const CACHE = 'suivi-pea-v' + VERSION;
 
 // Chemins relatifs : fonctionne aussi sous https://<user>.github.io/<depot>/
 const ASSETS = [

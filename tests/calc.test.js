@@ -1,7 +1,7 @@
 /* Tests des calculs — lancer avec : node --test tests/ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Calc, Dates, Store, Fmt, parsePricesFile, mergeQuotes, priceUrls } = require('../app.js');
+const { Calc, Dates, Store, Fmt, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls } = require('../app.js');
 const { parseChart } = require('../tools/fetch-prices.js');
 
 const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≠ ${b}`);
@@ -248,4 +248,11 @@ test('script GitHub Action : lecture de la réponse Yahoo', () => {
   assert.equal(q.date, '2026-09-24');
   assert.deepEqual(q.history, [['2026-09-22', 6.1], ['2026-09-24', 6.1734]]);
   assert.throws(() => parseChart({ chart: { result: null, error: { code: 'Not Found' } } }));
+});
+
+test('version identique dans app.js et sw.js', () => {
+  const sw = require('fs').readFileSync(require('path').join(__dirname, '..', 'sw.js'), 'utf8');
+  const m = sw.match(/const VERSION = '([^']+)'/);
+  assert.ok(m, 'VERSION introuvable dans sw.js');
+  assert.equal(m[1], APP_VERSION);
 });
