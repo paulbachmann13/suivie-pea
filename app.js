@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.1.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.2.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -725,19 +725,55 @@ const App = {
   },
 
   /* ---------- Service worker : hors ligne + avis de mise à jour ---------- */
+  swReg: null,
+  reloadOnUpdate: false,
+
   registerServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
     // Une page déjà contrôlée qui change de contrôleur = nouvelle version installée
     const hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (hadController) document.getElementById('update-banner').hidden = false;
+      if (App.reloadOnUpdate) location.reload(); // demandé via le bouton ↻
+      else if (hadController) document.getElementById('update-banner').hidden = false;
     });
     navigator.serviceWorker.register('sw.js')
-      .then((reg) => reg.update())
+      .then((reg) => { App.swReg = reg; return reg.update(); })
       .catch((e) => console.warn('SW non enregistré', e));
   },
 
+  /**
+   * Bouton ↻ : cherche une nouvelle version de l'appli (et la charge),
+   * sinon actualise les cours. Utile dans l'appli installée sur iPhone,
+   * où l'on ne peut pas recharger la page.
+   */
+  async refreshApp() {
+    const btn = document.getElementById('btn-refresh');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add('spinning');
+    try {
+      const reg = App.swReg;
+      if (!reg) { location.reload(); return; }
+      await reg.update();
+      if (reg.installing || reg.waiting) {
+        // Nouvelle version trouvée : on recharge dès qu'elle est active
+        App.reloadOnUpdate = true;
+        App.toast('Mise à jour en cours…');
+        setTimeout(() => location.reload(), 8000); // filet de sécurité
+        return;
+      }
+      await App.refreshQuotes({ silent: true });
+      App.toast(`Appli à jour (v${APP_VERSION}) · cours actualisés`);
+    } catch (e) {
+      console.warn('Actualisation impossible', e);
+      App.toast('Actualisation impossible (hors ligne ?)');
+    }
+    btn.disabled = false;
+    btn.classList.remove('spinning');
+  },
+
   bindBanners() {
+    document.getElementById('btn-refresh').addEventListener('click', App.refreshApp);
     document.getElementById('btn-reload').addEventListener('click', () => location.reload());
     document.getElementById('btn-backup-now').addEventListener('click', App.exportJSON);
   },
