@@ -1,10 +1,14 @@
 /* ==========================================================================
    Suivi PEA — service worker
-   Stratégie « stale-while-revalidate » : l'appli s'ouvre instantanément
-   depuis le cache (hors ligne compris) et se met à jour en arrière-plan.
+   - Fichiers de l'appli : servis depuis le cache de LEUR version (hors ligne
+     compris). Pas de mise à jour en arrière-plan fichier par fichier : on
+     évite ainsi de mélanger l'index.html d'une version et l'app.js d'une autre.
+   - Une nouvelle version arrive quand VERSION change : le nouveau service
+     worker télécharge tout d'un bloc, puis remplace l'ancien.
+   - Cours (data/*.json) : réseau d'abord, cache si hors ligne.
    Pensez à incrémenter VERSION (ici et dans app.js) à chaque modification.
    ========================================================================== */
-const VERSION = '1.2.0'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
+const VERSION = '1.2.1'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
 const CACHE = 'suivi-pea-v' + VERSION;
 
 // Chemins relatifs : fonctionne aussi sous https://<user>.github.io/<depot>/
@@ -55,22 +59,14 @@ self.addEventListener('fetch', (event) => {
     caches.open(CACHE).then(async (cache) => {
       // ignoreSearch : « ./?source=pwa » sert la même page
       const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(new Request(req, { cache: 'no-cache' })) // revalide auprès du serveur
-        .then((res) => {
-          if (res && res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => null);
-
-      if (cached) {
-        event.waitUntil(network);
-        return cached;
+      if (cached) return cached;
+      try {
+        return await fetch(req);
+      } catch (e) {
+        // Hors ligne : on renvoie la page principale pour les navigations
+        if (req.mode === 'navigate') return cache.match('./index.html');
+        return new Response('', { status: 504, statusText: 'Hors ligne' });
       }
-      const res = await network;
-      if (res) return res;
-      // Hors ligne et rien en cache : on renvoie la page principale pour les navigations
-      if (req.mode === 'navigate') return cache.match('./index.html');
-      return new Response('', { status: 504, statusText: 'Hors ligne' });
     })
   );
 });

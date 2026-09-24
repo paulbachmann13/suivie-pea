@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.2.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.2.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -27,6 +27,9 @@ const Fmt = (() => {
   const compact = new Intl.NumberFormat('fr-FR', { notation: 'compact', maximumFractionDigits: 1 });
 
   const sign = (v) => (v > 0 ? '+' : ''); // le signe « − » est déjà ajouté par Intl
+  // Arrondis au centime / au centième de % : évite « −0,00 € » pour −0,001 € (erreurs d'arrondi)
+  const cents = (v) => (Math.abs(v) < 0.005 ? 0 : v);
+  const bp = (r) => (Math.abs(r) < 0.00005 ? 0 : r);
 
   return {
     eur: (v) => eur.format(v),
@@ -36,8 +39,10 @@ const Fmt = (() => {
     /** Valeur pour un champ de saisie : virgule décimale, sans séparateur de milliers. */
     input: (v) => (v === null || v === undefined || v === '' ? '' : String(v).replace('.', ',')),
     pct: (ratio) => pct.format(ratio),
-    signedEur: (v) => sign(v) + eur.format(v),
-    signedPct: (ratio) => sign(ratio) + pct.format(ratio),
+    signedEur: (v) => sign(cents(v)) + eur.format(cents(v)),
+    signedPct: (ratio) => sign(bp(ratio)) + pct.format(bp(ratio)),
+    /** Classe CSS d'une variation : 'pos', 'neg' ou '' (nulle au centime près). */
+    trend: (v) => (cents(v) > 0 ? 'pos' : cents(v) < 0 ? 'neg' : ''),
     compactEur: (v) => compact.format(v) + ' €',
     /** 'AAAA-MM-JJ' → 'JJ/MM/AAAA' */
     date: (iso) => {
@@ -117,8 +122,15 @@ const Calc = {
     return Number(s);
   },
 
-  /** Normalise un ticker : « dcam » → « DCAM ». */
-  normTicker(t) { return String(t || '').trim().toUpperCase(); },
+  /**
+   * Normalise un ticker : « dcam » → « DCAM », « DCAM.PA » → « DCAM »,
+   * ISIN connu → ticker (pour retrouver le cours automatique).
+   */
+  normTicker(t) {
+    const s = String(t || '').trim().toUpperCase().replace(/\s+/g, ' ');
+    const ALIASES = { FR001400U5Q4: 'DCAM' }; // Amundi PEA Monde (MSCI World)
+    return ALIASES[s] || s.replace(/\.PA$/, '');
+  },
 
   /** Coût total d'un achat (frais inclus). */
   purchaseCost(p) { return p.qty * p.price + (p.fees || 0); },
@@ -191,6 +203,18 @@ const Calc = {
       total += byDate.get(date);
       return { date, total };
     });
+  },
+
+  /** Bornes des paramètres du simulateur (au-delà, le calcul n'a pas de sens). */
+  validSim(key, v) {
+    if (!Number.isFinite(v)) return false;
+    switch (key) {
+      case 'monthly': case 'initial': return v >= 0;
+      case 'years': return v >= 0 && v <= 80;
+      case 'rate': return v > -100 && v <= 100;
+      case 'ter': return v >= 0 && v < 100;
+      default: return true;
+    }
   },
 
   /**
@@ -378,15 +402,33 @@ const Store = {
     };
   },
 
+  BACKUP_KEY: 'suivi-pea:v1:secours',
+  loadIssues: 0, // lignes ignorées au dernier chargement (affiché à l'utilisateur)
+
+  /**
+   * Charge les données. Une ligne abîmée est ignorée (et non plus toute la
+   * sauvegarde) ; dans ce cas, l'original est d'abord copié sous BACKUP_KEY
+   * pour ne jamais rien perdre.
+   */
   load() {
+    let raw = null;
     try {
-      const raw = localStorage.getItem(Store.KEY);
+      raw = localStorage.getItem(Store.KEY);
       if (!raw) return Store.defaults();
-      return Store.sanitize(JSON.parse(raw));
+      const { state, dropped } = Store.clean(JSON.parse(raw));
+      Store.loadIssues = dropped;
+      if (dropped) Store.keepBackup(raw);
+      return state;
     } catch (e) {
-      console.warn('Lecture des données impossible, valeurs par défaut.', e);
+      console.warn('Lecture des données impossible, copie de secours conservée.', e);
+      Store.loadIssues = -1;
+      if (raw) Store.keepBackup(raw);
       return Store.defaults();
     }
+  },
+
+  keepBackup(raw) {
+    try { localStorage.setItem(Store.BACKUP_KEY, raw); } catch (e) { /* quota */ }
   },
 
   save(state) {
@@ -397,45 +439,97 @@ const Store = {
     }
   },
 
-  /** Valide et nettoie des données (localStorage ou fichier importé). */
+  /** Import d'un fichier : strict, la moindre ligne invalide refuse le fichier. */
   sanitize(data) {
+    const { state, errors } = Store.clean(data);
+    if (errors.length) throw new Error(errors[0]);
+    return state;
+  },
+
+  /**
+   * Valide et nettoie des données. Les lignes invalides sont écartées et
+   * listées dans errors ; dropped = leur nombre.
+   */
+  clean(data) {
     if (!data || typeof data !== 'object' || !Array.isArray(data.purchases)) {
       throw new Error('Fichier invalide : liste des achats absente.');
     }
     const def = Store.defaults();
-    const purchases = data.purchases.map((p, idx) => {
+    const errors = [];
+    const ids = new Set();
+    const uniqueId = (id) => {
+      let v = id ? String(id) : Store.newId();
+      if (ids.has(v)) v = Store.newId(); // identifiants en double : on en recrée un
+      ids.add(v);
+      return v;
+    };
+    const num = (v) => (typeof v === 'string' ? Calc.parseNumber(v) : Number(v));
+    const finite = (v) => Number.isFinite(v);
+
+    const purchases = [];
+    data.purchases.forEach((p, idx) => {
       const clean = {
-        id: String(p.id || Store.newId()),
-        date: String(p.date),
-        ticker: Calc.normTicker(p.ticker),
-        qty: Number(p.qty),
-        price: Number(p.price),
-        fees: Number(p.fees) || 0,
+        id: '',
+        date: String(p && p.date),
+        ticker: Calc.normTicker(p && p.ticker),
+        qty: num(p && p.qty),
+        price: num(p && p.price),
+        fees: p && p.fees !== undefined && p.fees !== null && p.fees !== '' ? num(p.fees) : 0,
       };
-      if (!Dates.isValidISO(clean.date) || !clean.ticker || !(clean.qty > 0) || !(clean.price > 0) || clean.fees < 0) {
-        throw new Error(`Achat n°${idx + 1} invalide.`);
+      if (!Dates.isValidISO(clean.date) || !clean.ticker || !(clean.qty > 0) || !(clean.price > 0) ||
+          !(clean.fees >= 0) || ![clean.qty, clean.price, clean.fees].every(finite)) {
+        errors.push(`Achat n°${idx + 1} invalide.`);
+        return;
       }
-      return clean;
+      clean.id = uniqueId(p.id);
+      purchases.push(clean);
     });
-    const deposits = (Array.isArray(data.deposits) ? data.deposits : []).map((d, idx) => {
-      const clean = { id: String(d.id || Store.newId()), date: String(d.date), amount: Number(d.amount) };
-      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0)) throw new Error(`Versement n°${idx + 1} invalide.`);
-      return clean;
+    const deposits = [];
+    (Array.isArray(data.deposits) ? data.deposits : []).forEach((d, idx) => {
+      const clean = { id: '', date: String(d && d.date), amount: num(d && d.amount) };
+      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0) || !finite(clean.amount)) {
+        errors.push(`Versement n°${idx + 1} invalide.`);
+        return;
+      }
+      clean.id = uniqueId(d.id);
+      deposits.push(clean);
     });
     const prices = {};
-    for (const [t, q] of Object.entries(data.prices || {})) {
-      if (q && Number(q.price) > 0) prices[Calc.normTicker(t)] = { price: Number(q.price), date: String(q.date || ''), source: q.source || 'manuel' };
+    for (const [t, q] of Object.entries(data.prices && typeof data.prices === 'object' ? data.prices : {})) {
+      const price = num(q && q.price);
+      if (price > 0 && finite(price)) {
+        prices[Calc.normTicker(t)] = {
+          price,
+          date: Dates.isValidISO(q.date) ? q.date : '',
+          source: q.source === 'auto' ? 'auto' : 'manuel',
+        };
+      }
     }
+    // Réglages : chaque valeur doit être un nombre valide, sinon valeur par défaut
+    const pickNumbers = (src, defaults, ok) => {
+      const out = { ...defaults };
+      for (const k of Object.keys(defaults)) {
+        const v = num(src && src[k]);
+        if (finite(v) && ok(k, v)) out[k] = v;
+      }
+      return out;
+    };
+    const sim = pickNumbers(data.sim, def.sim, (k, v) => Calc.validSim(k, v));
+    const plan = pickNumbers(data.plan, def.plan, (k, v) => (k === 'amount' ? v > 0 : v >= 0));
     return {
-      version: 1,
-      openingDate: Dates.isValidISO(data.openingDate) ? data.openingDate : def.openingDate,
-      purchases,
-      deposits,
-      prices,
-      sim: { ...def.sim, ...(data.sim || {}) },
-      plan: { ...def.plan, ...(data.plan || {}) },
-      lastExport: Dates.isValidISO(data.lastExport) ? data.lastExport : null,
-      theme: data.theme === 'light' ? 'light' : 'dark',
+      state: {
+        version: 1,
+        openingDate: Dates.isValidISO(data.openingDate) ? data.openingDate : def.openingDate,
+        purchases,
+        deposits,
+        prices,
+        sim,
+        plan,
+        lastExport: Dates.isValidISO(data.lastExport) ? data.lastExport : null,
+        theme: data.theme === 'light' ? 'light' : 'dark',
+      },
+      errors,
+      dropped: errors.length,
     };
   },
 
@@ -639,14 +733,14 @@ function drawChart(container, opts) {
       } else {
         d += `V${sy(0)}H${sx(xs[0])}Z`;
       }
-      svgEl('path', { d, fill: `var(${s.color})`, 'fill-opacity': 0.22, stroke: 'none' }, svg);
+      svgEl('path', { d, style: `fill: var(${s.color}); fill-opacity: 0.22; stroke: none` }, svg);
     }
-    svgEl('path', { d: line, fill: 'none', stroke: `var(${s.color})`, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+    svgEl('path', { d: line, style: `fill: none; stroke: var(${s.color})`, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
   });
 
   // Couche d'interaction (crosshair + infobulle)
   const cross = svgEl('line', { class: 'crosshair', y1: m.top, y2: H - m.bottom, visibility: 'hidden' }, svg);
-  const dots = series.map((s) => svgEl('circle', { r: 4, fill: `var(${s.color})`, stroke: 'var(--surface)', 'stroke-width': 2, visibility: 'hidden' }, svg));
+  const dots = series.map((s) => svgEl('circle', { r: 4, style: `fill: var(${s.color}); stroke: var(--surface)`, 'stroke-width': 2, visibility: 'hidden' }, svg));
   const hit = svgEl('rect', { x: m.left, y: 0, width: W - m.left - m.right, height: H, fill: 'transparent' }, svg);
 
   const tooltip = document.getElementById('tooltip');
@@ -722,6 +816,14 @@ const App = {
     });
 
     App.registerServiceWorker();
+
+    if (Store.loadIssues) {
+      alert(Store.loadIssues < 0
+        ? 'Vos données n\'ont pas pu être lues. Une copie de secours a été conservée : importez votre dernière sauvegarde (onglet PEA).'
+        : `${Store.loadIssues} ligne(s) abîmée(s) ont été ignorées. Une copie de secours des données d'origine a été conservée.`);
+    }
+    // Demande au navigateur de ne pas effacer les données en cas de manque de place
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   },
 
   /* ---------- Service worker : hors ligne + avis de mise à jour ---------- */
@@ -762,8 +864,8 @@ const App = {
         setTimeout(() => location.reload(), 8000); // filet de sécurité
         return;
       }
-      await App.refreshQuotes({ silent: true });
-      App.toast(`Appli à jour (v${APP_VERSION}) · cours actualisés`);
+      const ok = await App.refreshQuotes({ silent: true });
+      App.toast(`Appli à jour (v${APP_VERSION})${ok ? ' · cours actualisés' : ' · cours indisponibles'}`);
     } catch (e) {
       console.warn('Actualisation impossible', e);
       App.toast('Actualisation impossible (hors ligne ?)');
@@ -832,7 +934,7 @@ const App = {
   /* ---------- Tableau de bord ---------- */
   renderDashboard() {
     const pf = Calc.portfolio(App.state.purchases, App.state.prices);
-    const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+    const cls = Fmt.trend;
 
     document.getElementById('kpi-value').textContent = Fmt.eur(pf.value);
     const pvEl = document.getElementById('kpi-pv');
@@ -889,8 +991,12 @@ const App = {
       ? `Cours non saisi pour ${pf.missingQuotes.join(', ')} : valorisé au dernier prix d'achat.`
       : '';
 
-    // Une carte par titre, avec saisie du cours actuel
+    // Une carte par titre, avec saisie du cours actuel.
+    // Si l'utilisateur est en train de taper un cours, on le restaure après le rendu.
     const box = document.getElementById('positions');
+    const active = document.activeElement;
+    const typing = active && box.contains(active) && active.name === 'price'
+      ? { ticker: active.dataset.ticker, value: active.value } : null;
     box.replaceChildren();
     if (!pf.positions.length) {
       const p = document.createElement('p');
@@ -931,6 +1037,7 @@ const App = {
           ? `Cours de clôture du ${Fmt.date(pos.quoteDate)} (automatique)`
           : `Cours saisi le ${Fmt.date(pos.quoteDate)}`;
       const input = card.querySelector('input');
+      input.dataset.ticker = pos.ticker;
       input.value = pos.hasQuote ? Fmt.input(pos.currentPrice) : '';
       input.placeholder = Fmt.input(pos.lastPrice);
       card.querySelector('form').addEventListener('submit', (e) => {
@@ -938,6 +1045,10 @@ const App = {
         App.setPrice(pos.ticker, input.value);
       });
       box.appendChild(card);
+      if (typing && typing.ticker === pos.ticker) {
+        input.value = typing.value;
+        input.focus({ preventScroll: true });
+      }
     }
 
     if (ACTIVE_PROVIDER.auto) {
@@ -966,20 +1077,21 @@ const App = {
 
   /** Charge les cours du fournisseur actif et les fusionne avec les cours saisis. */
   async refreshQuotes({ silent = false } = {}) {
-    if (!ACTIVE_PROVIDER.auto) return;
+    if (!ACTIVE_PROVIDER.auto) return false;
     App.lastQuoteFetch = Date.now();
     let data = null;
     try { data = await ACTIVE_PROVIDER.load(); } catch (e) { console.warn('Cours indisponibles', e); }
     if (!data) {
       if (!silent) App.toast('Cours indisponibles (hors ligne ?)');
-      return;
+      return false;
     }
     const n = mergeQuotes(App.state.prices, data.quotes, ACTIVE_PROVIDER.id);
-    App.histories = data.histories;
-    App.saveHistories();
+    const histChanged = JSON.stringify(data.histories) !== JSON.stringify(App.histories);
+    if (histChanged) { App.histories = data.histories; App.saveHistories(); }
     if (n) App.persist();
-    App.renderAll();
+    if (n || histChanged) App.renderAll();
     if (!silent) App.toast(n ? `${n} cours mis à jour` : 'Cours déjà à jour');
+    return true;
   },
 
   renderCumulChart() {
@@ -1134,10 +1246,16 @@ const App = {
   },
 
   /* ---------- Calculateur « prochain achat » ---------- */
-  bindPlanner() {
+  fillPlannerValues() {
     const form = document.getElementById('plan-form');
     form.amount.value = Fmt.input(App.state.plan.amount);
     form.fees.value = App.state.plan.fees ? Fmt.input(App.state.plan.fees) : '';
+    delete form.price.dataset.touched;
+  },
+
+  bindPlanner() {
+    const form = document.getElementById('plan-form');
+    App.fillPlannerValues();
     form.addEventListener('submit', (e) => e.preventDefault());
     form.addEventListener('input', (e) => {
       if (e.target.name === 'price') form.price.dataset.touched = '1';
@@ -1209,8 +1327,13 @@ const App = {
         initial: Calc.parseNumber(form.initial.value, true),
         ter: Calc.parseNumber(form.ter.value, true),
       };
-      // On ignore les saisies incomplètes / invalides
-      if (Object.values(v).some((x) => !Number.isFinite(x)) || v.years > 80 || v.years < 0 || v.monthly < 0 || v.initial < 0) return;
+      // Saisie incomplète ou hors bornes : on garde le dernier calcul et on le signale
+      const LABELS = { monthly: 'Versement mensuel', rate: 'Rendement (entre −100 et 100 %)', years: 'Durée (0 à 80 ans)', initial: 'Capital de départ', ter: 'Frais (0 à 100 %)' };
+      const bad = Object.keys(v).filter((k) => !Calc.validSim(k, v[k]));
+      const err = document.getElementById('sim-error');
+      err.hidden = !bad.length;
+      err.textContent = bad.length ? `À corriger : ${bad.map((k) => LABELS[k]).join(', ')}.` : '';
+      if (bad.length) return;
       App.state.sim = v;
       App.persist();
       App.renderSimulator();
@@ -1251,8 +1374,8 @@ const App = {
         { name: 'Gains', color: '--series-gains', values: pts.map((p) => Math.max(p.value - p.invested, 0)), area: true },
       ],
       stacked: true,
-      xLabel: (x) => `${Math.round(x * 10) / 10} an${x >= 2 ? 's' : ''}`,
-      tooltipTitle: (x) => `Après ${Math.round(x * 10) / 10} an${x >= 2 ? 's' : ''}`,
+      xLabel: (x) => `${Fmt.num(Math.round(x * 10) / 10)} an${x >= 2 ? 's' : ''}`,
+      tooltipTitle: (x) => `Après ${Fmt.num(Math.round(x * 10) / 10)} an${x >= 2 ? 's' : ''}`,
       tooltipRows: (i) => [
         { name: 'Capital', value: Fmt.eur0(pts[i].value) },
         { name: 'Versé', color: '--series-invested', value: Fmt.eur0(pts[i].invested) },
@@ -1267,7 +1390,7 @@ const App = {
     const od = document.getElementById('opening-date');
     od.value = App.state.openingDate;
     od.addEventListener('change', () => {
-      if (!Dates.isValidISO(od.value)) return;
+      if (!Dates.isValidISO(od.value)) { od.value = App.state.openingDate; return; }
       App.state.openingDate = od.value;
       App.persist();
       App.renderPea();
@@ -1361,19 +1484,42 @@ const App = {
     }
   },
 
-  exportJSON() {
-    App.state.lastExport = Dates.today();
-    App.persist();
-    App.renderDashboard();
-    const blob = new Blob([JSON.stringify(App.state, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
+  /**
+   * Export JSON. Sur iPhone (appli installée), un lien de téléchargement ne
+   * marche pas bien : on passe par la feuille de partage, qui propose
+   * « Enregistrer dans Fichiers ». Ailleurs : téléchargement classique.
+   * La date de sauvegarde n'est mise à jour que si l'export a bien eu lieu.
+   */
+  async exportJSON() {
+    const name = `suivi-pea-${Dates.today()}.json`;
+    const json = JSON.stringify({ ...App.state, lastExport: Dates.today() }, null, 2);
+    const done = () => {
+      App.state.lastExport = Dates.today();
+      App.persist();
+      App.renderDashboard();
+    };
+
+    const file = new File([json], name, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: 'Sauvegarde Suivi PEA' });
+        done();
+        App.toast('Sauvegarde exportée');
+      } catch (e) {
+        if (e.name !== 'AbortError') App.toast('Export impossible : ' + e.message);
+      }
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `suivi-pea-${Dates.today()}.json`;
+    a.download = name;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    done();
   },
 
   importJSON(e) {
@@ -1390,6 +1536,7 @@ const App = {
         document.getElementById('opening-date').value = data.openingDate;
         App.applyTheme();
         App.bindSimulatorValues();
+        App.fillPlannerValues();
         App.renderAll();
         App.toast('Sauvegarde importée');
       } catch (err) {

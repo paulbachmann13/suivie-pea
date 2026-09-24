@@ -19,11 +19,11 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Récupérer les cours
         run: node tools/fetch-prices.js
@@ -37,5 +37,7 @@ jobs:
             echo "Pas de nouveau cours."
           else
             git commit -m "Cours du $(date -u +%d/%m/%Y)"
+            # main a pu avancer pendant l'exécution (fusion d'une PR) : on se remet à jour avant de pousser
+            git pull --rebase origin main
             git push
           fi
