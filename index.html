@@ -116,6 +116,7 @@
         <label>Frais annuels de l'ETF (%)
           <input name="ter" inputmode="decimal" type="text">
         </label>
+        <p class="error" id="sim-error" hidden></p>
         <button type="button" class="btn" id="btn-sim-from-pf">Partir de mon portefeuille actuel</button>
       </form>
 
@@ -179,7 +180,8 @@
         <p class="hint">Les données restent sur ce téléphone. Exportez-les régulièrement (Fichiers / iCloud Drive).</p>
         <button class="btn" id="btn-export">⬇︎ Exporter (JSON)</button>
         <label class="btn" for="import-file">⬆︎ Importer une sauvegarde</label>
-        <input type="file" id="import-file" accept="application/json,.json" hidden>
+        <!-- visually-hidden et non display:none : sinon le label n'ouvre pas le sélecteur sur certains iPhone -->
+        <input type="file" id="import-file" class="visually-hidden" accept="application/json,.json,text/plain">
       </div>
 
       <h2>Affichage</h2>
@@ -206,8 +208,8 @@
       <label>Date
         <input type="date" name="date" required>
       </label>
-      <label>Ticker / nom
-        <input type="text" name="ticker" list="tickers" required autocapitalize="characters">
+      <label>Ticker (ex. DCAM)
+        <input type="text" name="ticker" list="tickers" required autocapitalize="characters" autocorrect="off" spellcheck="false">
       </label>
       <datalist id="tickers">
         <option value="DCAM">Amundi PEA Monde (MSCI World) — FR001400U5Q4</option>

@@ -256,3 +256,61 @@ test('version identique dans app.js et sw.js', () => {
   assert.ok(m, 'VERSION introuvable dans sw.js');
   assert.equal(m[1], APP_VERSION);
 });
+
+test('chargement tolérant : une ligne abîmée n\'efface plus tout', () => {
+  const { state, dropped, errors } = Store.clean({ purchases: [
+    { id: 'a', date: '2026-01-05', ticker: 'DCAM', qty: 16, price: 6, fees: 0 },
+    { id: 'b', date: '2026-02-30', ticker: 'DCAM', qty: 10, price: 6, fees: 0 },
+  ] });
+  assert.equal(state.purchases.length, 1);
+  assert.equal(dropped, 1);
+  assert.match(errors[0], /Achat n°2/);
+  // l'import d'un fichier reste strict
+  assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-02-30', ticker: 'X', qty: 1, price: 1 }] }), /Achat n°1/);
+});
+
+test('import : nombres en texte, identifiants en double, réglages invalides', () => {
+  const s = Store.sanitize({
+    purchases: [
+      { id: 'x', date: '2026-01-05', ticker: 'dcam', qty: '16', price: '6,12', fees: '0,99' },
+      { id: 'x', date: '2026-02-05', ticker: 'DCAM', qty: 1, price: 6 },
+    ],
+    sim: { monthly: '150', rate: 'abc', years: 500, initial: -3, ter: '0,3' },
+    plan: { amount: 0, fees: '1' },
+    prices: { DCAM: { price: '6,2', date: 'hier', source: 'bidule' } },
+  });
+  assert.equal(s.purchases[0].price, 6.12);
+  assert.equal(s.purchases[0].fees, 0.99);
+  assert.notEqual(s.purchases[0].id, s.purchases[1].id);
+  assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3 });
+  assert.deepEqual(s.plan, { amount: 100, fees: 1 });
+  assert.deepEqual(s.prices.DCAM, { price: 6.2, date: '', source: 'manuel' });
+  assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-01-05', ticker: 'X', qty: Infinity, price: 1 }] }));
+});
+
+test('tickers : ISIN et suffixe de place ramenés au ticker', () => {
+  assert.equal(Calc.normTicker(' dcam.pa '), 'DCAM');
+  assert.equal(Calc.normTicker('fr001400u5q4'), 'DCAM');
+  assert.equal(Calc.normTicker('paeem'), 'PAEEM');
+});
+
+test('pas de « −0,00 » pour une variation arrondie à zéro', () => {
+  const nbsp = /[  ]/g;
+  assert.equal(Fmt.signedEur(-2.8e-14).replace(nbsp, ' '), '0,00 €');
+  assert.equal(Fmt.signedEur(-0.004).replace(nbsp, ' '), '0,00 €');
+  assert.equal(Fmt.signedEur(-0.006).replace(nbsp, ' '), '-0,01 €');
+  assert.equal(Fmt.signedPct(-1e-9).replace(nbsp, ' '), '0,00 %');
+  assert.equal(Fmt.trend(-2.8e-14), '');
+  assert.equal(Fmt.trend(0.01), 'pos');
+  assert.equal(Fmt.trend(-0.01), 'neg');
+});
+
+test('simulateur : bornes des paramètres', () => {
+  assert.equal(Calc.validSim('rate', -150), false);
+  assert.equal(Calc.validSim('rate', -100), false);
+  assert.equal(Calc.validSim('rate', -20), true);
+  assert.equal(Calc.validSim('ter', 100), false);
+  assert.equal(Calc.validSim('years', 81), false);
+  assert.equal(Calc.validSim('monthly', -1), false);
+  assert.ok(Number.isFinite(Calc.simulate({ monthly: 100, annualRate: -99, years: 10 }).final));
+});
