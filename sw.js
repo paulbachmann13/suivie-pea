@@ -4,7 +4,7 @@
    depuis le cache (hors ligne compris) et se met à jour en arrière-plan.
    Pensez à incrémenter CACHE à chaque modification des fichiers.
    ========================================================================== */
-const CACHE = 'suivi-pea-v1';
+const CACHE = 'suivi-pea-v2';
 
 // Chemins relatifs : fonctionne aussi sous https://<user>.github.io/<depot>/
 const ASSETS = [
