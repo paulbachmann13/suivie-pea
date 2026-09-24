@@ -1,7 +1,8 @@
 /* Tests des calculs — lancer avec : node --test tests/ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Calc, Dates, Store, Fmt } = require('../app.js');
+const { Calc, Dates, Store, Fmt, parsePricesFile, mergeQuotes, priceUrls } = require('../app.js');
+const { parseChart } = require('../tools/fetch-prices.js');
 
 const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≠ ${b}`);
 
@@ -139,4 +140,112 @@ test('formats français', () => {
   assert.equal(Fmt.date('2026-03-05'), '05/03/2026');
   assert.equal(Fmt.input(6.12), '6,12');
   assert.equal(Fmt.signedPct(0.0664).replace(nbsp, ' '), '+6,64 %');
+});
+
+test('calculateur prochain achat : parts entières et reste', () => {
+  const r = Calc.buyPlan(100, 6.12, 0);
+  assert.equal(r.qty, 16);
+  close(r.cost, 97.92);
+  close(r.left, 2.08);
+
+  const withFees = Calc.buyPlan(100, 6.12, 0.99); // (100 − 0,99) / 6,12 = 16,17
+  assert.equal(withFees.qty, 16);
+  close(withFees.cost, 98.91);
+
+  assert.equal(Calc.buyPlan(12, 6, 0).qty, 2, 'montant pile : pas d\'erreur d\'arrondi');
+  assert.equal(Calc.buyPlan(5, 6.12).qty, 0);
+  assert.equal(Calc.buyPlan(0, 6), null);
+  assert.equal(Calc.buyPlan(100, 0), null);
+});
+
+test('versements, cash et base du plafond', () => {
+  const none = Calc.deposits([], purchases);
+  assert.equal(none.hasDeposits, false);
+  close(none.base, 292.58);
+  assert.equal(none.cash, null);
+
+  const dep = Calc.deposits([{ date: '2026-01-02', amount: 200 }, { date: '2026-03-01', amount: 150 }], purchases);
+  close(dep.base, 350);
+  close(dep.cash, 350 - 292.58);
+});
+
+test('TRI : cas simples', () => {
+  // 1 000 € placés, 1 100 € un an (365 j) plus tard → 10 %
+  close(Calc.xirr([{ date: '2025-01-01', amount: -1000 }, { date: '2026-01-01', amount: 1100 }]), 0.10, 1e-6);
+  // perte : 1 000 → 900 → −10 %
+  close(Calc.xirr([{ date: '2025-01-01', amount: -1000 }, { date: '2026-01-01', amount: 900 }]), -0.10, 1e-6);
+  // DCA : deux versements de 100 €, valeur finale 210 €, contrôle par la VAN
+  const flows = [{ date: '2025-01-01', amount: -100 }, { date: '2025-07-02', amount: -100 }, { date: '2026-01-01', amount: 210 }];
+  const r = Calc.xirr(flows);
+  const t0 = Dates.parse('2025-01-01');
+  const npv = flows.reduce((s, f) => s + f.amount / Math.pow(1 + r, Dates.daysBetween(t0, Dates.parse(f.date)) / 365), 0);
+  close(npv, 0, 1e-6);
+  assert.ok(r > 0.05 && r < 0.08, String(r));
+  // incalculable : que des sorties
+  assert.equal(Calc.xirr([{ date: '2025-01-01', amount: -100 }, { date: '2025-02-01', amount: -100 }]), null);
+});
+
+test('TRI du portefeuille', () => {
+  const x = Calc.portfolioXirr(purchases, 312, '2026-09-05');
+  assert.equal(x.days, 243);
+  assert.ok(x.rate > 0);
+  assert.equal(Calc.portfolioXirr([], 0), null);
+});
+
+test('série valeur vs versements', () => {
+  const hist = { DCAM: [['2026-01-02', 5.9], ['2026-01-05', 6.0], ['2026-01-06', 6.1], ['2026-02-05', 5.8], ['2026-02-06', 5.9], ['2026-03-05', 6.4], ['2026-03-06', 6.5]] };
+  const s = Calc.valueSeries(purchases, hist);
+  assert.equal(s[0].date, '2026-01-05', 'démarre au premier achat');
+  close(s[0].value, 16 * 6.0);
+  close(s[0].invested, 96.99);
+  close(s[1].value, 16 * 6.1);
+  const last = s[s.length - 1];
+  assert.equal(last.date, '2026-03-06');
+  close(last.value, 48 * 6.5);
+  close(last.invested, 292.58);
+  // titre sans historique → pas de série
+  assert.deepEqual(Calc.valueSeries(purchases, {}), []);
+});
+
+test('fichier de cours : lecture et fusion avec les cours saisis', () => {
+  const parsed = parsePricesFile({
+    updatedAt: '2026-09-24T18:00:00Z',
+    quotes: { dcam: { price: 6.17, date: '2026-09-24', history: [['2026-09-24', 6.17], ['2026-09-23', 6.1], ['bad', 1]] } },
+  });
+  assert.deepEqual(parsed.quotes.DCAM, { price: 6.17, date: '2026-09-24' });
+  assert.deepEqual(parsed.histories.DCAM, [['2026-09-23', 6.1], ['2026-09-24', 6.17]]);
+  assert.equal(parsePricesFile({}), null);
+
+  // cours manuel du jour : conservé ; cours manuel plus ancien : remplacé
+  const p1 = { DCAM: { price: 6.2, date: '2026-09-24', source: 'manuel' } };
+  assert.equal(mergeQuotes(p1, parsed.quotes), 0);
+  assert.equal(p1.DCAM.price, 6.2);
+  const p2 = { DCAM: { price: 6.0, date: '2026-09-20', source: 'manuel' } };
+  assert.equal(mergeQuotes(p2, parsed.quotes), 1);
+  assert.deepEqual(p2.DCAM, { price: 6.17, date: '2026-09-24', source: 'auto' });
+  // cours auto déjà identique : rien à faire
+  assert.equal(mergeQuotes(p2, parsed.quotes), 0);
+});
+
+test('URL des cours selon l\'hébergement', () => {
+  assert.deepEqual(priceUrls({ hostname: 'paulbachmann13.github.io', pathname: '/suivie-pea/' }), [
+    'https://raw.githubusercontent.com/paulbachmann13/suivie-pea/main/data/prices.json',
+    'data/prices.json',
+  ]);
+  assert.deepEqual(priceUrls({ hostname: 'localhost', pathname: '/' }), ['data/prices.json']);
+});
+
+test('script GitHub Action : lecture de la réponse Yahoo', () => {
+  // 2 séances (heure de Paris) ; une clôture manquante (null) est ignorée
+  const ts = (iso) => Math.floor(Date.parse(iso) / 1000);
+  const json = { chart: { result: [{
+    meta: { currency: 'EUR', exchangeTimezoneName: 'Europe/Paris', regularMarketPrice: 6.1734, regularMarketTime: ts('2026-09-24T15:30:00Z') },
+    timestamp: [ts('2026-09-22T07:00:00Z'), ts('2026-09-23T07:00:00Z'), ts('2026-09-24T07:00:00Z')],
+    indicators: { quote: [{ close: [6.1, null, 6.15] }] },
+  }] } };
+  const q = parseChart(json);
+  assert.equal(q.price, 6.1734);
+  assert.equal(q.date, '2026-09-24');
+  assert.deepEqual(q.history, [['2026-09-22', 6.1], ['2026-09-24', 6.1734]]);
+  assert.throws(() => parseChart({ chart: { result: null, error: { code: 'Not Found' } } }));
 });

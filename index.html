@@ -28,6 +28,11 @@
          1. TABLEAU DE BORD
          ========================================================= -->
     <section id="view-dashboard" class="view" data-title="Tableau de bord">
+      <div class="banner" id="backup-banner" hidden>
+        <p id="backup-text"></p>
+        <button class="btn btn-small btn-primary" id="btn-backup-now">Exporter</button>
+      </div>
+
       <div class="hero card">
         <p class="label">Valeur actuelle</p>
         <p class="hero-value" id="kpi-value">0,00 €</p>
@@ -40,15 +45,21 @@
         <div class="kpi card"><p class="label">Plus-value</p><p class="kpi-value" id="kpi-pv-eur">0,00 €</p></div>
         <div class="kpi card"><p class="label">PRU moyen</p><p class="kpi-value" id="kpi-pru">—</p></div>
         <div class="kpi card"><p class="label">Nombre de parts</p><p class="kpi-value" id="kpi-qty">0</p></div>
+        <div class="kpi card"><p class="label">Rendement annualisé</p><p class="kpi-value" id="kpi-xirr">—</p><p class="hint" id="kpi-xirr-hint"></p></div>
+        <div class="kpi card" id="kpi-cash-card"><p class="label">Cash disponible</p><p class="kpi-value" id="kpi-cash">—</p><p class="hint" id="kpi-cash-hint"></p></div>
       </div>
 
       <h2>Cours actuels</h2>
-      <p class="hint">Saisissez le dernier cours de chaque titre (visible dans l'appli BforBank).</p>
+      <p class="hint" id="quotes-status">Les cours se mettent à jour automatiquement chaque soir de semaine. Vous pouvez aussi saisir un cours à la main.</p>
       <div id="positions" class="stack"></div>
 
-      <h2>Versements cumulés</h2>
+      <h2 id="chart-cumul-title">Valeur et versements</h2>
       <div class="card chart-card">
-        <div id="chart-cumul" class="chart" role="img" aria-label="Évolution des versements cumulés"></div>
+        <div class="legend" id="chart-cumul-legend">
+          <span><i class="key key-invested"></i>Versé</span>
+          <span id="legend-value"><i class="key-line key-value"></i>Valeur</span>
+        </div>
+        <div id="chart-cumul" class="chart" role="img" aria-label="Évolution de la valeur du portefeuille et des versements cumulés"></div>
       </div>
     </section>
 
@@ -56,7 +67,25 @@
          2. ACHATS
          ========================================================= -->
     <section id="view-purchases" class="view" data-title="Mes achats" hidden>
-      <button class="btn btn-primary btn-block" id="btn-add">+ Ajouter un achat</button>
+      <form id="plan-form" class="card form" autocomplete="off">
+        <h2 class="card-title">Prochain achat</h2>
+        <div class="row">
+          <label>Montant (€)
+            <input name="amount" inputmode="decimal" type="text">
+          </label>
+          <label>Cours (€)
+            <input name="price" inputmode="decimal" type="text">
+          </label>
+        </div>
+        <label>Frais de courtage (€)
+          <input name="fees" inputmode="decimal" type="text" placeholder="0">
+        </label>
+        <p class="plan-result" id="plan-result"></p>
+        <p class="hint" id="plan-left"></p>
+        <button type="button" class="btn btn-primary" id="btn-plan-save" disabled>Enregistrer cet achat</button>
+      </form>
+
+      <button class="btn btn-block" id="btn-add">+ Ajouter un achat</button>
       <div id="purchase-list" class="stack"></div>
       <p class="empty" id="purchase-empty">Aucun achat pour l'instant.<br>Ajoutez votre premier versement DCA 👆</p>
     </section>
@@ -81,6 +110,7 @@
         <label>Frais annuels de l'ETF (%)
           <input name="ter" inputmode="decimal" type="text">
         </label>
+        <button type="button" class="btn" id="btn-sim-from-pf">Partir de mon portefeuille actuel</button>
       </form>
 
       <div class="hero card">
@@ -114,12 +144,28 @@
         <div class="gauge" aria-hidden="true"><span id="pea-gauge-time"></span></div>
       </div>
 
+      <h2>Versements sur le PEA</h2>
+      <form id="deposit-form" class="card form" autocomplete="off">
+        <p class="hint" style="margin:0 0 12px">Les virements de votre compte courant vers le PEA. Ils servent au plafond de 150 000 € et au calcul du cash disponible.</p>
+        <div class="row">
+          <label>Date
+            <input type="date" name="date" required>
+          </label>
+          <label>Montant (€)
+            <input type="text" name="amount" inputmode="decimal" required>
+          </label>
+        </div>
+        <p class="error" id="deposit-error" hidden></p>
+        <button type="submit" class="btn btn-primary">+ Ajouter le versement</button>
+        <div id="deposit-list" class="stack"></div>
+      </form>
+
       <div class="card">
         <p class="label">Plafond de versements</p>
         <p class="kpi-value" id="pea-ceiling">0 € / 150 000 €</p>
         <div class="gauge" aria-hidden="true"><span id="pea-gauge-ceiling"></span></div>
         <p class="hint" id="pea-ceiling-left"></p>
-        <p class="hint">Estimé à partir de vos achats (frais inclus).</p>
+        <p class="hint" id="pea-ceiling-source"></p>
       </div>
 
       <h2>Sauvegarde</h2>
@@ -179,6 +225,11 @@
       </div>
     </form>
   </dialog>
+
+  <div class="banner banner-update" id="update-banner" hidden>
+    <p>Nouvelle version de l'appli installée.</p>
+    <button class="btn btn-small btn-primary" id="btn-reload">Recharger</button>
+  </div>
 
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>

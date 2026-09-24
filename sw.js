@@ -35,6 +35,18 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
 
+  // Cours (data/*.json) : réseau d'abord, cache si hors ligne
+  if (new URL(req.url).pathname.includes('/data/')) {
+    event.respondWith(
+      caches.open(CACHE).then((cache) =>
+        fetch(req)
+          .then((res) => { if (res.ok) cache.put(req, res.clone()); return res; })
+          .catch(() => cache.match(req, { ignoreSearch: true }).then((r) => r || new Response('', { status: 504 })))
+      )
+    );
+    return;
+  }
+
   event.respondWith(
     caches.open(CACHE).then(async (cache) => {
       // ignoreSearch : « ./?source=pwa » sert la même page
