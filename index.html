@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Suivi PEA</title>
+  <meta name="description" content="Suivi de mes versements et de la performance de mon PEA (DCA ETF MSCI World).">
+
+  <!-- PWA / iOS -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0d0d0d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Suivi PEA">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="view-title">Tableau de bord</h1>
+  </header>
+
+  <main>
+    <!-- =========================================================
+         1. TABLEAU DE BORD
+         ========================================================= -->
+    <section id="view-dashboard" class="view" data-title="Tableau de bord">
+      <div class="hero card">
+        <p class="label">Valeur actuelle</p>
+        <p class="hero-value" id="kpi-value">0,00 €</p>
+        <p class="hero-delta" id="kpi-pv">+0,00 € (+0,00 %)</p>
+        <p class="hint" id="kpi-warning" hidden></p>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi card"><p class="label">Total investi</p><p class="kpi-value" id="kpi-invested">0,00 €</p></div>
+        <div class="kpi card"><p class="label">Plus-value</p><p class="kpi-value" id="kpi-pv-eur">0,00 €</p></div>
+        <div class="kpi card"><p class="label">PRU moyen</p><p class="kpi-value" id="kpi-pru">—</p></div>
+        <div class="kpi card"><p class="label">Nombre de parts</p><p class="kpi-value" id="kpi-qty">0</p></div>
+      </div>
+
+      <h2>Cours actuels</h2>
+      <p class="hint">Saisissez le dernier cours de chaque titre (visible dans l'appli BforBank).</p>
+      <div id="positions" class="stack"></div>
+
+      <h2>Versements cumulés</h2>
+      <div class="card chart-card">
+        <div id="chart-cumul" class="chart" role="img" aria-label="Évolution des versements cumulés"></div>
+      </div>
+    </section>
+
+    <!-- =========================================================
+         2. ACHATS
+         ========================================================= -->
+    <section id="view-purchases" class="view" data-title="Mes achats" hidden>
+      <button class="btn btn-primary btn-block" id="btn-add">+ Ajouter un achat</button>
+      <div id="purchase-list" class="stack"></div>
+      <p class="empty" id="purchase-empty">Aucun achat pour l'instant.<br>Ajoutez votre premier versement DCA 👆</p>
+    </section>
+
+    <!-- =========================================================
+         3. SIMULATEUR
+         ========================================================= -->
+    <section id="view-simulator" class="view" data-title="Simulateur" hidden>
+      <form id="sim-form" class="card form" autocomplete="off">
+        <label>Versement mensuel (€)
+          <input name="monthly" inputmode="decimal" type="text" required>
+        </label>
+        <label>Rendement annuel moyen (%)
+          <input name="rate" inputmode="decimal" type="text" required>
+        </label>
+        <label>Durée (années)
+          <input name="years" inputmode="numeric" type="text" required>
+        </label>
+        <label>Capital de départ (€)
+          <input name="initial" inputmode="decimal" type="text">
+        </label>
+        <label>Frais annuels de l'ETF (%)
+          <input name="ter" inputmode="decimal" type="text">
+        </label>
+      </form>
+
+      <div class="hero card">
+        <p class="label">Capital final estimé</p>
+        <p class="hero-value" id="sim-final">0,00 €</p>
+        <div class="split">
+          <div><p class="label"><span class="key key-invested"></span>Versé</p><p class="kpi-value" id="sim-invested">0 €</p></div>
+          <div><p class="label"><span class="key key-gains"></span>Gains</p><p class="kpi-value" id="sim-gains">0 €</p></div>
+        </div>
+        <div class="bar" aria-hidden="true"><span id="sim-bar-invested"></span><span id="sim-bar-gains"></span></div>
+        <p class="hint" id="sim-share"></p>
+      </div>
+
+      <div class="card chart-card">
+        <div id="chart-sim" class="chart" role="img" aria-label="Projection du capital"></div>
+      </div>
+      <p class="hint">Simulation indicative : rendement constant, versements en fin de mois, hors fiscalité. Les performances passées ne préjugent pas des performances futures.</p>
+    </section>
+
+    <!-- =========================================================
+         4. PEA : compteur 5 ans, plafond, sauvegarde
+         ========================================================= -->
+    <section id="view-pea" class="view" data-title="Mon PEA" hidden>
+      <div class="card">
+        <label class="form">Date d'ouverture du PEA
+          <input type="date" id="opening-date">
+        </label>
+        <p class="label" style="margin-top:16px">Avant les 5 ans</p>
+        <p class="hero-value" id="pea-remaining">—</p>
+        <p class="hint" id="pea-date"></p>
+        <div class="gauge" aria-hidden="true"><span id="pea-gauge-time"></span></div>
+      </div>
+
+      <div class="card">
+        <p class="label">Plafond de versements</p>
+        <p class="kpi-value" id="pea-ceiling">0 € / 150 000 €</p>
+        <div class="gauge" aria-hidden="true"><span id="pea-gauge-ceiling"></span></div>
+        <p class="hint" id="pea-ceiling-left"></p>
+        <p class="hint">Estimé à partir de vos achats (frais inclus).</p>
+      </div>
+
+      <h2>Sauvegarde</h2>
+      <div class="card stack">
+        <p class="hint">Les données restent sur ce téléphone. Exportez-les régulièrement (Fichiers / iCloud Drive).</p>
+        <button class="btn" id="btn-export">⬇︎ Exporter (JSON)</button>
+        <label class="btn" for="import-file">⬆︎ Importer une sauvegarde</label>
+        <input type="file" id="import-file" accept="application/json,.json" hidden>
+      </div>
+
+      <h2>Affichage</h2>
+      <div class="card">
+        <button class="btn btn-block" id="btn-theme">Passer en thème clair</button>
+      </div>
+      <p class="hint center" id="app-version"></p>
+    </section>
+  </main>
+
+  <!-- Barre d'onglets (bas d'écran, pouce-friendly) -->
+  <nav class="tabbar" aria-label="Navigation">
+    <a href="#dashboard" data-view="dashboard"><span aria-hidden="true">◔</span>Bilan</a>
+    <a href="#purchases" data-view="purchases"><span aria-hidden="true">≡</span>Achats</a>
+    <a href="#simulator" data-view="simulator"><span aria-hidden="true">↗</span>Simulateur</a>
+    <a href="#pea" data-view="pea"><span aria-hidden="true">⏱</span>PEA</a>
+  </nav>
+
+  <!-- Fenêtre d'ajout / modification d'un achat -->
+  <dialog id="purchase-dialog">
+    <form id="purchase-form" class="form" method="dialog" autocomplete="off">
+      <h2 id="purchase-dialog-title">Nouvel achat</h2>
+      <input type="hidden" name="id">
+      <label>Date
+        <input type="date" name="date" required>
+      </label>
+      <label>Ticker / nom
+        <input type="text" name="ticker" list="tickers" required autocapitalize="characters">
+      </label>
+      <datalist id="tickers">
+        <option value="DCAM">Amundi PEA Monde (MSCI World) — FR001400U5Q4</option>
+      </datalist>
+      <div class="row">
+        <label>Nombre de parts
+          <input type="text" name="qty" inputmode="decimal" required>
+        </label>
+        <label>Prix unitaire (€)
+          <input type="text" name="price" inputmode="decimal" required>
+        </label>
+      </div>
+      <label>Frais (€)
+        <input type="text" name="fees" inputmode="decimal" placeholder="0">
+      </label>
+      <p class="hint" id="purchase-total"></p>
+      <p class="error" id="purchase-error" hidden></p>
+      <div class="row">
+        <button type="button" class="btn" id="btn-cancel">Annuler</button>
+        <button type="submit" class="btn btn-primary" value="save">Enregistrer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
