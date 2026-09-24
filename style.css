@@ -1,0 +1,247 @@
+/* ==========================================================================
+   Suivi PEA — feuille de style
+   Mobile-first, thème sombre par défaut. Toutes les couleurs sont des
+   variables : le thème clair ne redéfinit que ces variables.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #242423;
+  --border: rgba(255, 255, 255, 0.10);
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --accent: #3987e5;         /* boutons + série « versé » */
+  --accent-ink: #ffffff;
+  --series-invested: #3987e5;
+  --series-gains: #199e70;
+  --good: #0ca30c;
+  --bad: #e66767;
+  --radius: 16px;
+  --tap: 52px;               /* hauteur minimale des zones tactiles */
+  --tabbar-h: 64px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: rgba(11, 11, 11, 0.10);
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --accent: #2a78d6;
+  --series-invested: #2a78d6;
+  --series-gains: #1baf7a;
+  --good: #006300;
+  --bad: #d03b3b;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.4;
+  /* Laisse la place à la barre d'onglets + encoche iPhone */
+  padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 16px);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ---------- En-tête ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: calc(env(safe-area-inset-top) + 12px) 16px 12px;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.topbar h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+
+main { max-width: 640px; margin: 0 auto; padding: 0 16px; }
+
+h2 { font-size: 18px; margin: 28px 0 8px; }
+
+/* ---------- Cartes ---------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.stack > * + * { margin-top: 10px; }
+.stack > .card { margin-bottom: 0; }
+
+.label { margin: 0; color: var(--ink-2); font-size: 14px; }
+.hint { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.center { text-align: center; }
+.empty { text-align: center; color: var(--muted); padding: 32px 0; }
+.error { color: var(--bad); margin: 8px 0 0; font-size: 14px; }
+
+.hero-value { margin: 4px 0; font-size: 36px; font-weight: 700; letter-spacing: -0.02em; }
+.hero-delta { margin: 0; font-size: 17px; font-weight: 600; }
+.kpi-value { margin: 4px 0 0; font-size: 20px; font-weight: 650; }
+
+.kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.kpis .card { margin: 0; }
+
+.pos { color: var(--good); }
+.neg { color: var(--bad); }
+
+/* ---------- Boutons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--tap);
+  padding: 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  width: 100%;
+}
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn-danger { color: var(--bad); }
+.btn-block { width: 100%; margin-bottom: 12px; }
+.btn-small { min-height: 44px; padding: 0 14px; width: auto; }
+
+/* ---------- Formulaires ---------- */
+.form label { display: block; color: var(--ink-2); font-size: 14px; }
+.form label + label, .form .row + label, .form label + .row { margin-top: 12px; }
+input[type="text"], input[type="date"] {
+  display: block;
+  width: 100%;
+  min-height: var(--tap);
+  margin-top: 6px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 17px; /* ≥ 16px : évite le zoom automatique d'iOS */
+  -webkit-appearance: none;
+  appearance: none;
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; gap: 12px; }
+.row > * { flex: 1; min-width: 0; }
+.form .row .btn { margin-top: 16px; }
+
+/* ---------- Positions (cours actuel) ---------- */
+.position-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.position-head strong { font-size: 17px; }
+.position-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px;
+  margin: 10px 0; font-size: 14px; color: var(--ink-2);
+}
+.position-grid b { display: block; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.price-row { display: flex; gap: 8px; align-items: flex-end; }
+.price-row label { flex: 1; color: var(--ink-2); font-size: 14px; }
+
+/* ---------- Liste des achats ---------- */
+.purchase { display: flex; flex-direction: column; gap: 8px; }
+.purchase-top { display: flex; justify-content: space-between; gap: 8px; }
+.purchase-top strong { font-size: 17px; }
+.purchase-meta { color: var(--ink-2); font-size: 14px; font-variant-numeric: tabular-nums; }
+.purchase-actions { display: flex; gap: 8px; }
+.purchase-actions .btn { flex: 1; min-height: 44px; }
+
+/* ---------- Jauges ---------- */
+.gauge, .bar {
+  height: 12px; margin-top: 12px; border-radius: 6px;
+  background: var(--surface-2); overflow: hidden; display: flex; gap: 2px;
+}
+.gauge span, .bar span { display: block; height: 100%; border-radius: 6px; transition: width .3s; }
+.gauge span { background: var(--accent); }
+#sim-bar-invested { background: var(--series-invested); }
+#sim-bar-gains { background: var(--series-gains); }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+.key-invested { background: var(--series-invested); }
+.key-gains { background: var(--series-gains); }
+
+/* ---------- Graphiques SVG ---------- */
+.chart-card { padding: 12px 8px 8px; }
+.chart { width: 100%; height: 220px; position: relative; touch-action: pan-y; }
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart .grid line { stroke: var(--grid); stroke-width: 1; }
+.chart .baseline { stroke: var(--axis); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .crosshair { stroke: var(--ink-2); stroke-width: 1; }
+.chart .empty-msg { fill: var(--muted); font-size: 14px; }
+
+.tooltip {
+  position: fixed; z-index: 20; pointer-events: none;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 8px 10px; font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  max-width: 220px;
+}
+.tooltip .tt-title { color: var(--muted); margin-bottom: 4px; }
+.tooltip .tt-row { display: flex; align-items: center; gap: 6px; }
+.tooltip .tt-row b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.tooltip .tt-row span { color: var(--ink-2); }
+.tooltip .tt-key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+
+/* ---------- Barre d'onglets ---------- */
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+}
+.tabbar a {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 600;
+}
+.tabbar a span { font-size: 22px; line-height: 1; }
+.tabbar a.active { color: var(--accent); }
+
+/* ---------- Fenêtre modale ---------- */
+dialog {
+  width: min(560px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 20px 16px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog h2 { margin-top: 0; }
+
+/* ---------- Notification éphémère ---------- */
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 12px);
+  z-index: 30; background: var(--ink); color: var(--page);
+  padding: 10px 16px; border-radius: 12px; font-weight: 600; font-size: 14px;
+  max-width: calc(100% - 32px);
+}
