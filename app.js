@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -713,6 +713,7 @@ const App = {
     App.renderAll();
     window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
     document.getElementById('app-version').textContent = `Suivi PEA v${APP_VERSION} — cours : ${ACTIVE_PROVIDER.label.toLowerCase()}`;
+    document.getElementById('version-badge').textContent = `v${APP_VERSION}`;
 
     // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)
     App.refreshQuotes({ silent: true });
@@ -1375,5 +1376,5 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', App.init);
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, parsePricesFile, mergeQuotes, priceUrls };
+  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls };
 }
