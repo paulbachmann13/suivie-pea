@@ -28,6 +28,7 @@ jobs:
         run: node tools/check-sources.js PSP5 FR0011871128 DCAM CW8 "Amundi PEA S&P 500 UCITS ETF Acc" "Amundi PEA Monde"
 
       - name: Site en ligne dans un vrai Chrome (bouton « Actualiser le cours »)
+        if: ${{ !cancelled() }}   # même si l'étape précédente a échoué
         run: |
           npm install --no-save --no-package-lock playwright-core@1.56.1
           node tools/e2e-live.js "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" "${{ inputs.version }}" PSP5 FR0011871128

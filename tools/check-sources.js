@@ -14,6 +14,7 @@ const queries = process.argv.slice(2).length ? process.argv.slice(2) : ['PSP5', 
 
 async function main() {
   let failures = 0;
+  let busy = 0;
   for (const query of queries) {
     const cors = new Set();
     // Même appel que dans le navigateur, avec l'en-tête Origin du site
@@ -34,6 +35,12 @@ async function main() {
         console.log(`ℹ️  Euronext « ${query} » → choix proposés : ${e.candidates.map((c) => `${c.symbol} (${c.isin}-${c.mic})`).join(', ')}`);
         continue;
       }
+      if (e instanceof QuoteError && e.code === 'busy') {
+        // Raté passager d'Euronext sur un titre : avertissement, pas d'alerte e-mail
+        busy++;
+        console.log(`::warning::Euronext ${query} momentanément indisponible (réponse parasite répétée)`);
+        continue;
+      }
       failures++;
       console.log(`❌ Euronext ${query} → ${e instanceof QuoteError ? `${e.code} : ${e.message} ${e.detail}` : e.message}`);
     }
@@ -50,6 +57,8 @@ async function main() {
       console.log(`::warning::Yahoo ${symbol} indisponible (${e.message}) : la clôture quotidienne de secours risque de manquer`);
     }
   }
+  // Euronext indisponible pour TOUS les titres : là, c'est une vraie panne
+  if (busy === queries.length) failures++;
   process.exit(failures ? 1 : 0);
 }
 main();
