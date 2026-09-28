@@ -29,6 +29,11 @@ async function main() {
         `${q.price} € séance du ${q.date} | CORS : ${[...cors].join(', ')}${corsOk ? '' : ' ⚠️ NON AUTORISÉ'}`);
       if (!corsOk) failures++;
     } catch (e) {
+      if (e instanceof QuoteError && e.code === 'ambiguous') {
+        // Recherche par nom : normal, l'appli propose ces choix à l'utilisateur
+        console.log(`ℹ️  Euronext « ${query} » → choix proposés : ${e.candidates.map((c) => `${c.symbol} (${c.isin}-${c.mic})`).join(', ')}`);
+        continue;
+      }
       failures++;
       console.log(`❌ Euronext ${query} → ${e instanceof QuoteError ? `${e.code} : ${e.message} ${e.detail}` : e.message}`);
     }

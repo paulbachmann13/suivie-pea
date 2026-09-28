@@ -423,3 +423,80 @@ test('horodatage au format français', () => {
   assert.equal(Fmt.dateTime(iso), '28/09/2026 à 18:07');
   assert.equal(Fmt.dateTime(null), '');
 });
+
+/* ---------- Recherche par nom, réponses parasites (v1.3.1) ---------- */
+const searchItem = (isin, symbol, name, mic = 'XPAR') => ({
+  isin, mic, value: isin,
+  label: `<span class='name'><a href='/en/product/etfs/${isin}-${mic}'>${name}</a></span><span class='symbol'>${symbol}</span><span class='mic'>${mic}</span>`,
+});
+
+test('recherche par nom : jamais de choix automatique, liste de candidats', async () => {
+  // Réponse réelle d'Euronext à « Amundi PEA Monde » : un AUTRE ETF arrive en premier
+  const body = JSON.stringify([
+    searchItem('FR001400S9V0', 'MLUX', 'Amundi PEA Monde Luxe'),
+    searchItem('FR001400U5Q4', 'DCAM', 'AMUNDI PEA MONDE MSCI World UCITS ETF Acc'),
+  ]);
+  try {
+    await Euronext.quote('Amundi PEA Monde', null, fakeFetch([['instrumentSearch', { body }]]));
+    assert.fail('aurait dû demander de choisir');
+  } catch (e) {
+    assert.equal(e.code, 'ambiguous');
+    assert.deepEqual(e.candidates.map((c) => c.symbol), ['MLUX', 'DCAM']);
+  }
+  // le ticker exact, lui, est choisi directement
+  const f = fakeFetch([['instrumentSearch', { body }], ['getFullDownloadAjax/FR001400U5Q4', { body: FIX('euronext-history-psp5.csv') }]]);
+  assert.equal((await Euronext.quote('dcam', null, f)).instrument.isin, 'FR001400U5Q4');
+});
+
+test('recherche : variantes quand le nom complet ne donne rien (S&P)', async () => {
+  const variants = Euronext.queryVariants('Amundi PEA S&P 500 UCITS ETF Acc');
+  assert.equal(variants[0], 'Amundi PEA S&P 500 UCITS ETF Acc');
+  assert.ok(variants.includes('Amundi PEA SP 500'));
+  assert.deepEqual(Euronext.queryVariants('DCAM'), ['DCAM']);
+  // la 1re variante ne donne rien, une suivante trouve le titre → candidats proposés
+  const empty = JSON.stringify([{ value: '', isin: '', mic: '', label: 'See all results' }]);
+  const found = JSON.stringify([searchItem('FR0011871128', 'PSP5', 'Amundi PEA S&amp;P 500 UCITS ETF Acc')]);
+  const f = async (url) => ({ ok: true, status: 200, text: async () => (url.includes('SP%20500') ? found : empty) });
+  await assert.rejects(Euronext.quote('Amundi PEA S&P 500 UCITS ETF Acc', null, f), (e) => {
+    assert.equal(e.code, 'ambiguous');
+    assert.equal(e.candidates[0].symbol, 'PSP5');
+    assert.equal(e.candidates[0].name, 'Amundi PEA S&P 500 UCITS ETF Acc');
+    return true;
+  });
+  // rien du tout → introuvable
+  await assert.rejects(Euronext.quote('XYZ123', null, async () => ({ ok: true, status: 200, text: async () => empty })), { code: 'notfound' });
+});
+
+test('réponse parasite d\'Euronext : on réessaie', async () => {
+  const junk = "Can't open /MIDDLELOGS/EURONEXT/live/wfi_stats_request.2026-09-28.log in AwlLogging::lopen on line 59";
+  let n = 0;
+  const f = async (url) => {
+    n++;
+    const body = n === 1 ? junk : url.includes('instrumentSearch') ? FIX('euronext-search-psp5.json') : FIX('euronext-history-psp5.csv');
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const q = await Euronext.quote('PSP5', null, f);
+  assert.equal(q.price, 59.37);
+  assert.equal(n, 3, '1 réponse parasite + recherche + historique');
+  // parasite collé devant les données : retiré
+  assert.equal(Euronext.stripJunk(junk + '\n[1]'), '[1]');
+  // toujours parasite → erreur claire après 3 essais
+  await assert.rejects(Euronext.quote('PSP5', null, async () => ({ ok: true, status: 200, text: async () => junk })), { code: 'format' });
+});
+
+test('HTTP 404 : erreur serveur (et non « introuvable »)', async () => {
+  await assert.rejects(Euronext.quote('PSP5', null, fakeFetch([['instrumentSearch', { status: 404 }]])), { code: 'server' });
+});
+
+test('stockage : les anciens choix automatiques non exacts sont oubliés', () => {
+  const s = Store.clean({
+    purchases: [],
+    instruments: {
+      'AMUNDI PEA MONDE': { isin: 'FR001400S9V0', mic: 'XPAR', symbol: 'MLUX', name: 'mauvais choix auto' },
+      'MON ETF': { isin: 'FR001400U5Q4', mic: 'XPAR', symbol: 'DCAM', name: 'choisi', confirmed: true },
+      DCAM: { isin: 'FR001400U5Q4', mic: 'XPAR', symbol: 'DCAM', name: 'exact' },
+    },
+  }).state;
+  assert.deepEqual(Object.keys(s.instruments).sort(), ['DCAM', 'MON ETF']);
+  assert.equal(s.instruments['MON ETF'].confirmed, true);
+});

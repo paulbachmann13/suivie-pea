@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.3.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.3.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -527,9 +527,12 @@ const Store = {
     };
     const instruments = {};
     for (const [t, ins] of Object.entries(data.instruments && typeof data.instruments === 'object' ? data.instruments : {})) {
-      if (ins && Euronext.validIsin(ins.isin) && /^[A-Z]{4}$/.test(ins.mic)) {
-        instruments[Calc.normTicker(t)] = { isin: ins.isin, mic: ins.mic, symbol: String(ins.symbol || ''), name: String(ins.name || '') };
-      }
+      const tk = Calc.normTicker(t);
+      if (!ins || !Euronext.validIsin(ins.isin) || !/^[A-Z]{4}$/.test(ins.mic)) continue;
+      const symbol = String(ins.symbol || '').toUpperCase();
+      // Choix automatique qui ne correspond pas exactement (ancienne version) : on le refera
+      if (!ins.confirmed && symbol !== tk && ins.isin !== tk) continue;
+      instruments[tk] = { isin: ins.isin, mic: ins.mic, symbol, name: String(ins.name || ''), confirmed: !!ins.confirmed };
     }
     const sim = pickNumbers(data.sim, def.sim, (k, v) => Calc.validSim(k, v));
     const plan = pickNumbers(data.plan, def.plan, (k, v) => (k === 'amount' ? v > 0 : v >= 0));
@@ -680,7 +683,8 @@ QuoteError.MESSAGES = {
   offline: 'Pas de connexion internet.',
   timeout: 'Euronext ne répond pas (délai dépassé).',
   network: 'Euronext est injoignable pour le moment.',
-  notfound: 'Titre introuvable sur Euronext : vérifiez le ticker ou l\'ISIN.',
+  notfound: 'Titre introuvable sur Euronext.',
+  ambiguous: 'Plusieurs titres correspondent : choisissez le bon.',
   noprice: 'Aucun cours récent publié par Euronext pour ce titre.',
   quota: 'Trop de demandes envoyées à Euronext : réessayez dans quelques minutes.',
   blocked: 'Euronext refuse l\'accès pour le moment (protection anti-robots ?).',
@@ -694,46 +698,85 @@ const Euronext = {
 
   validIsin(v) { return typeof v === 'string' && /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(v); },
 
-  /** Appel HTTP avec délai maximal et erreurs traduites en QuoteError. */
+  /**
+   * Appel HTTP avec délai maximal et erreurs traduites en QuoteError.
+   * Euronext renvoie parfois, au lieu des données, une ligne de journal
+   * parasite (« Can't open /MIDDLELOGS/… ») : on la retire, et si rien
+   * d'autre n'est arrivé, on réessaie (jusqu'à 3 fois).
+   */
   async get(url, fetchFn = fetch) {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) throw new QuoteError('offline');
-    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = ctrl && setTimeout(() => ctrl.abort(), Euronext.TIMEOUT_MS);
-    let res;
-    try {
-      res = await fetchFn(url, { cache: 'no-store', signal: ctrl && ctrl.signal });
-    } catch (e) {
-      throw new QuoteError(e && e.name === 'AbortError' ? 'timeout' : 'network', e && e.message);
-    } finally {
-      if (timer) clearTimeout(timer);
+    for (let attempt = 1; ; attempt++) {
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ctrl && setTimeout(() => ctrl.abort(), Euronext.TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetchFn(url, { cache: 'no-store', signal: ctrl && ctrl.signal });
+      } catch (e) {
+        throw new QuoteError(e && e.name === 'AbortError' ? 'timeout' : 'network', e && e.message);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (res.status === 429) throw new QuoteError('quota');
+      if (res.status === 401 || res.status === 403) throw new QuoteError('blocked', 'HTTP ' + res.status);
+      if (!res.ok) throw new QuoteError('server', 'HTTP ' + res.status);
+      const text = Euronext.stripJunk(await res.text());
+      if (text.trim()) return text;
+      if (attempt >= 3) throw new QuoteError('format', 'réponse vide ou parasite');
+      await new Promise((ok) => setTimeout(ok, 400 * attempt));
     }
-    if (res.status === 429) throw new QuoteError('quota');
-    if (res.status === 401 || res.status === 403) throw new QuoteError('blocked', 'HTTP ' + res.status);
-    if (res.status === 404) throw new QuoteError('notfound');
-    if (!res.ok) throw new QuoteError('server', 'HTTP ' + res.status);
-    return res.text();
   },
 
-  /**
-   * Choisit l'instrument dans la réponse de la recherche Euronext.
-   * Priorité : ticker ou ISIN identique, puis cotation à Paris (XPAR).
-   * @returns {{isin, mic, symbol, name}} ou null
-   */
-  pickInstrument(json, query) {
-    if (!Array.isArray(json)) return null;
-    const q = String(query || '').trim().toUpperCase();
+  /** Retire la ligne de journal parasite qu'Euronext insère parfois. */
+  stripJunk(text) {
+    return String(text || '').replace(/^﻿/, '').replace(/^Can't open [^\n]*(\n|$)/i, '');
+  },
+
+  /** Lit la réponse de la recherche : liste d'instruments {isin, mic, symbol, name}. */
+  parseSearch(json) {
+    if (!Array.isArray(json)) return [];
     const decode = (h) => String(h || '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&#0?39;|&apos;/g, "'").trim();
-    const items = json
+    const seen = new Set();
+    return json
       .filter((it) => it && Euronext.validIsin(it.isin) && /^[A-Z]{4}$/.test(it.mic))
       .map((it) => {
         const label = String(it.label || '');
         const sym = (label.match(/class='symbol'>([^<]+)</) || [])[1] || '';
         const name = (label.match(/<a [^>]*>([^<]+)<\/a>/) || [])[1] || it.name || '';
         return { isin: it.isin, mic: it.mic, symbol: decode(sym).toUpperCase(), name: decode(name) };
-      });
-    const score = (it) => (it.symbol === q || it.isin === q ? 2 : 0) + (it.mic === 'XPAR' ? 1 : 0);
-    items.sort((a, b) => score(b) - score(a));
-    return items[0] || null;
+      })
+      .filter((it) => !seen.has(it.isin + it.mic) && seen.add(it.isin + it.mic))
+      .sort((a, b) => (b.mic === 'XPAR') - (a.mic === 'XPAR')); // Paris d'abord
+  },
+
+  /** Instrument dont le ticker ou l'ISIN est exactement la saisie (Paris en priorité), sinon null. */
+  exactMatch(candidates, query) {
+    const q = String(query || '').trim().toUpperCase();
+    return candidates.find((c) => c.symbol === q || c.isin === q) || null;
+  },
+
+  /**
+   * Instrument exactement désigné par la saisie (ticker ou ISIN), Paris en
+   * priorité. Une recherche par nom ne choisit JAMAIS toute seule : « Amundi
+   * PEA Monde » renvoie d'abord un autre ETF (MLUX) — l'utilisateur confirme.
+   */
+  pickInstrument(json, query) {
+    return Euronext.exactMatch(Euronext.parseSearch(json), query);
+  },
+
+  /**
+   * Variantes d'une saisie pour la recherche : Euronext abîme « & » (S&P → 0
+   * résultat) et ne trouve pas toujours un nom complet.
+   */
+  queryVariants(query) {
+    const q = String(query || '').trim();
+    const clean = (v) => v.replace(/[()[\],.;:/+'"«»-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const core = (v) => clean(v).replace(/\b(UCITS|ETF|ACC|DIST|CAPI|EUR|USD|C|D)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+    const joined = core(q.replace(/&/g, ''));          // « S&P 500 » → « SP 500 »
+    const spaced = core(q.replace(/&/g, ' '));         // « S&P 500 » → « S P 500 »
+    const words = joined.split(' ');
+    return [...new Set([q, clean(q.replace(/&/g, '')), joined, spaced, words.slice(0, 3).join(' '), words.slice(0, 2).join(' ')])]
+      .filter((v) => v.length >= 2);
   },
 
   /**
@@ -756,14 +799,31 @@ const Euronext = {
     return best;
   },
 
-  /** Trouve l'ISIN et la place d'un ticker ou d'un ISIN. */
+  /** Recherche Euronext : candidats de la première variante qui donne des résultats. */
+  async search(query, fetchFn = fetch) {
+    for (const v of Euronext.queryVariants(query)) {
+      const text = await Euronext.get(`${Euronext.BASE}/en/instrumentSearch/searchJSON?q=${encodeURIComponent(v)}`, fetchFn);
+      let json;
+      try { json = JSON.parse(text.slice(text.indexOf('['))); } catch (e) { throw new QuoteError('format', 'recherche'); }
+      const found = Euronext.parseSearch(json);
+      if (found.length) return found;
+    }
+    return [];
+  },
+
+  /**
+   * Trouve l'ISIN et la place d'un ticker ou d'un ISIN.
+   * Correspondance exacte → instrument. Sinon QuoteError 'ambiguous' avec
+   * err.candidates (l'utilisateur choisit), ou 'notfound'.
+   */
   async resolve(query, fetchFn = fetch) {
-    const text = await Euronext.get(`${Euronext.BASE}/en/instrumentSearch/searchJSON?q=${encodeURIComponent(query)}`, fetchFn);
-    let json;
-    try { json = JSON.parse(text); } catch (e) { throw new QuoteError('format', 'recherche'); }
-    const ins = Euronext.pickInstrument(json, query);
-    if (!ins) throw new QuoteError('notfound');
-    return ins;
+    const candidates = await Euronext.search(query, fetchFn);
+    if (!candidates.length) throw new QuoteError('notfound', query);
+    const exact = Euronext.exactMatch(candidates, query);
+    if (exact) return exact;
+    const err = new QuoteError('ambiguous', query);
+    err.candidates = candidates.slice(0, 6);
+    throw err;
   },
 
   /** Dernier cours d'un instrument (séances des 15 derniers jours). */
@@ -773,7 +833,7 @@ const Euronext = {
       `?format=csv&decimal_separator=.&date_form=d/m/Y&op=&adjusted=Y&base100=` +
       `&startdate=${Dates.toISO(start)}&enddate=${Dates.toISO(today)}`;
     const text = await Euronext.get(url, fetchFn);
-    if (!/Date;/.test(text)) throw new QuoteError('format', 'historique');
+    if (!/Date;/.test(text)) throw new QuoteError('format', 'historique : ' + text.slice(0, 60));
     const last = Euronext.parseHistoryCsv(text);
     if (!last) throw new QuoteError('noprice');
     return last;
@@ -792,7 +852,7 @@ const Euronext = {
       last = await Euronext.lastPrice(ins, fetchFn);
     } catch (e) {
       // Instrument mémorisé qui ne répond plus (radiation, changement de place…) : nouvelle recherche
-      if (!known || !(e instanceof QuoteError) || !['notfound', 'noprice'].includes(e.code)) throw e;
+      if (!known || !(e instanceof QuoteError) || !['notfound', 'noprice', 'server'].includes(e.code)) throw e;
       ins = await Euronext.resolve(ticker, fetchFn);
       last = await Euronext.lastPrice(ins, fetchFn);
     }
@@ -1183,7 +1243,7 @@ const App = {
       card.className = 'card';
       card.innerHTML = `
         <div class="position-head"><strong></strong><span class="${cls(pos.pv)}"></span></div>
-        <p class="position-name" data-f="name"></p>
+        <p class="position-name"><span data-f="name"></span><button class="link-btn" type="button" data-a="change">Changer de titre</button></p>
         <div class="position-grid">
           <div>Parts<b data-f="qty"></b></div>
           <div>PRU<b data-f="pru"></b></div>
@@ -1198,6 +1258,15 @@ const App = {
           <button class="btn btn-small btn-live" type="button" data-a="live"></button>
         </div>
         <p class="quote-error" data-f="error" role="alert" hidden></p>
+        <div class="resolver" data-f="resolver" hidden>
+          <div class="candidates" data-f="candidates"></div>
+          <form class="resolver-form" autocomplete="off">
+            <label>Ticker ou ISIN sur Euronext
+              <input type="text" name="code" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="ex. DCAM ou FR001400U5Q4" enterkeyhint="search">
+            </label>
+            <button class="btn btn-small btn-primary" type="submit">Chercher</button>
+          </form>
+        </div>
         <form class="price-row" autocomplete="off">
           <label>Corriger à la main (€)
             <input type="text" inputmode="decimal" name="price" enterkeyhint="done">
@@ -1212,7 +1281,11 @@ const App = {
       card.querySelector('.position-head span').textContent = `${Fmt.signedEur(pos.pv)} · ${Fmt.signedPct(pos.pvPct)}`;
       const nameEl = card.querySelector('[data-f=name]');
       nameEl.textContent = ins ? `${ins.name}${ins.symbol && ins.symbol !== pos.ticker ? ' · ' + ins.symbol : ''} · ${ins.isin}` : '';
-      nameEl.hidden = !ins;
+      card.querySelector('.position-name').hidden = !ins;
+      card.querySelector('[data-a=change]').addEventListener('click', () => {
+        App.liveStatus[pos.ticker] = { code: 'change' };
+        App.renderDashboard();
+      });
       card.querySelector('[data-f=qty]').textContent = Fmt.num(pos.qty);
       card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pru);
       card.querySelector('[data-f=invested]').textContent = Fmt.eur(pos.invested);
@@ -1230,14 +1303,46 @@ const App = {
       const errEl = card.querySelector('[data-f=error]');
       errEl.hidden = !status.error;
       if (status.error) {
-        errEl.textContent = `${status.error} ${pos.hasQuote ? 'Le dernier cours connu est conservé. ' : ''}Vous pouvez saisir le cours à la main ci-dessous.`;
+        const about = status.query ? ` (recherche : « ${status.query} »)` : '';
+        errEl.textContent = ['notfound', 'ambiguous'].includes(status.code)
+          ? `${status.error}${about}`
+          : `${status.error} ${pos.hasQuote ? 'Le dernier cours connu est conservé. ' : ''}Vous pouvez saisir le cours à la main ci-dessous.`;
       }
 
-      const input = card.querySelector('input');
+      // Titre introuvable, plusieurs possibilités ou « Changer de titre » :
+      // l'utilisateur choisit dans la liste ou indique le ticker / l'ISIN Euronext
+      const resolver = card.querySelector('[data-f=resolver]');
+      resolver.hidden = !['notfound', 'ambiguous', 'change'].includes(status.code);
+      const list = card.querySelector('[data-f=candidates]');
+      if (status.code === 'change') {
+        const hint = document.createElement('p');
+        hint.className = 'hint';
+        hint.textContent = 'Indiquez le ticker ou l\'ISIN exact du titre (visible dans l\'appli de votre banque).';
+        list.appendChild(hint);
+      }
+      for (const c of status.candidates || []) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn candidate';
+        const nm = document.createElement('span');
+        nm.textContent = c.name || c.symbol;
+        const sub = document.createElement('small');
+        sub.textContent = `${c.symbol} · ${c.isin} · ${c.mic === 'XPAR' ? 'Paris' : c.mic}`;
+        b.append(nm, sub);
+        b.addEventListener('click', () => App.chooseInstrument(pos.ticker, c));
+        list.appendChild(b);
+      }
+      card.querySelector('.resolver-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const code = e.target.code.value.trim();
+        if (code) App.refreshLive(pos.ticker, { force: true, announce: true, query: code });
+      });
+
+      const input = card.querySelector('input[name=price]');
       input.dataset.ticker = pos.ticker;
       input.value = pos.hasQuote ? Fmt.input(pos.currentPrice) : '';
       input.placeholder = Fmt.input(pos.lastPrice);
-      card.querySelector('form').addEventListener('submit', (e) => {
+      card.querySelector('.price-row').addEventListener('submit', (e) => {
         e.preventDefault();
         App.setPrice(pos.ticker, input.value);
       });
@@ -1292,13 +1397,15 @@ const App = {
    *               du même jour ou plus récente.
    * @returns true si un cours a été obtenu
    */
-  async refreshLive(ticker, { force = true, announce = false } = {}) {
+  async refreshLive(ticker, { force = true, announce = false, query = null } = {}) {
     if ((App.liveStatus[ticker] || {}).loading) return false;
     App.liveStatus[ticker] = { loading: true };
     App.renderDashboard();
     try {
-      const q = await Euronext.quote(ticker, App.state.instruments[ticker]);
-      App.state.instruments[ticker] = q.instrument;
+      const known = query ? null : App.state.instruments[ticker];
+      const q = await Euronext.quote(query || ticker, known);
+      // Un code saisi par l'utilisateur vaut confirmation du titre
+      App.state.instruments[ticker] = { ...q.instrument, confirmed: !!(query || (known && known.confirmed)) };
       const cur = App.state.prices[ticker];
       if (force || !cur || cur.source !== 'manuel' || q.date > cur.date) {
         App.state.prices[ticker] = { price: q.price, date: q.date, source: 'euronext', at: q.at };
@@ -1309,13 +1416,26 @@ const App = {
       return true;
     } catch (e) {
       const err = e instanceof QuoteError ? e : new QuoteError('network', e && e.message);
-      if (err.code === 'notfound') delete App.state.instruments[ticker];
-      App.liveStatus[ticker] = { error: err.message, code: err.code };
+      if (['notfound', 'ambiguous'].includes(err.code)) delete App.state.instruments[ticker];
+      App.liveStatus[ticker] = {
+        error: err.message,
+        code: err.code,
+        query: ['notfound', 'ambiguous'].includes(err.code) ? (query || ticker) : null,
+        candidates: err.candidates || [],
+      };
       console.warn('Cours indisponible', ticker, err.code, err.detail);
       return false;
     } finally {
       App.renderAll();
     }
+  },
+
+  /** L'utilisateur a choisi le bon titre dans la liste : on le retient et on récupère le cours. */
+  async chooseInstrument(ticker, candidate) {
+    App.state.instruments[ticker] = { ...candidate, confirmed: true };
+    App.persist();
+    delete App.liveStatus[ticker];
+    return App.refreshLive(ticker, { force: true, announce: true });
   },
 
   /** Actualise tous les titres, l'un après l'autre (pour ménager Euronext). */

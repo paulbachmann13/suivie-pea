@@ -25,7 +25,7 @@ jobs:
           node-version: 22
 
       - name: Sources de cours (Euronext + Yahoo de secours)
-        run: node tools/check-sources.js PSP5 FR0011871128 DCAM
+        run: node tools/check-sources.js PSP5 FR0011871128 DCAM CW8 "Amundi PEA S&P 500 UCITS ETF Acc" "Amundi PEA Monde"
 
       - name: Site en ligne dans un vrai Chrome (bouton « Actualiser le cours »)
         run: |
