@@ -20,6 +20,7 @@
   --series-invested: #3987e5;
   --series-gains: #199e70;
   --series-value: #199e70;
+  --series-rate: #d95926;   /* hypothèse de rendement (pointillés) */
   --good: #0ca30c;
   --bad: #e66767;
   --radius: 16px;
@@ -43,6 +44,7 @@
   --series-invested: #2a78d6;
   --series-gains: #1baf7a;
   --series-value: #1baf7a;
+  --series-rate: #eb6834;
   --good: #006300;
   --bad: #d03b3b;
 }
@@ -367,3 +369,11 @@ dialog h2 { margin-top: 0; }
 .candidate small { color: var(--muted); font-weight: 500; font-size: 13px; margin-top: 2px; }
 .resolver-form { display: flex; gap: 8px; align-items: flex-end; }
 .resolver-form label { flex: 1; color: var(--ink-2); font-size: 14px; }
+
+/* ---------- Réel vs hypothèse (simulateur) ---------- */
+.key-rate { background: repeating-linear-gradient(90deg, var(--series-rate) 0 5px, transparent 5px 8px); }
+.real-diff { margin-top: 12px; }
+.real-chart { margin-top: 12px; }
+.real-chart .legend { padding: 0 0 8px; flex-wrap: wrap; row-gap: 4px; }
+.form input:disabled { opacity: .6; }
+.form label.switch-row { display: flex; } /* l'emporte sur « .form label { display: block } » */

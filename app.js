@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.3.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.4.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -231,17 +231,19 @@ const Calc = {
    * - versement en fin de mois
    * @returns {{final, invested, gains, gainsShare, points:[{month, invested, value}]}}
    */
-  simulate({ monthly = 0, annualRate = 0, years = 0, initial = 0, ter = 0 }) {
+  simulate({ monthly = 0, annualRate = 0, years = 0, initial = 0, ter = 0, initialInvested = null }) {
     const net = (1 + annualRate / 100) * (1 - ter / 100) - 1;
     const i = Math.pow(1 + net, 1 / 12) - 1;
     const n = Math.max(0, Math.round(years * 12));
+    // Déjà investi au départ (sans les gains passés) ; par défaut = capital de départ
+    const base = initialInvested === null ? initial : initialInvested;
     let value = initial;
-    const points = [{ month: 0, invested: initial, value }];
+    const points = [{ month: 0, invested: base, value }];
     for (let m = 1; m <= n; m++) {
       value = value * (1 + i) + monthly;
-      points.push({ month: m, invested: initial + monthly * m, value });
+      points.push({ month: m, invested: base + monthly * m, value });
     }
-    const invested = initial + monthly * n;
+    const invested = base + monthly * n;
     const gains = value - invested;
     return {
       final: value,
@@ -251,6 +253,39 @@ const Calc = {
       monthlyRate: i,
       points,
     };
+  },
+
+  /**
+   * Rythme réel du DCA : total investi (frais inclus) divisé par le nombre
+   * de mois entre le premier et le dernier achat (bornes incluses).
+   * @returns {{monthly, months, total, count, since}} ou null sans achat passé
+   */
+  realPace(purchases, todayISO = Dates.today()) {
+    const past = purchases.filter((p) => p.date <= todayISO).sort((a, b) => a.date.localeCompare(b.date));
+    if (!past.length) return null;
+    const first = Dates.parse(past[0].date);
+    const last = Dates.parse(past[past.length - 1].date);
+    const months = (last.getFullYear() - first.getFullYear()) * 12 + last.getMonth() - first.getMonth() + 1;
+    const total = past.reduce((sum, p) => sum + Calc.purchaseCost(p), 0);
+    return { monthly: total / months, months, total, count: past.length, since: past[0].date };
+  },
+
+  /** Rendement annuel net de frais : (1 + taux) × (1 − frais) − 1. */
+  netRate(annualRate, ter = 0) {
+    return (1 + annualRate / 100) * (1 - ter / 100) - 1;
+  },
+
+  /**
+   * Valeur qu'auraient VOS achats à une date s'ils avaient rapporté
+   * exactement le taux (net de frais), chacun depuis sa propre date.
+   * Les frais de courtage sont inclus au départ (comme dans la réalité).
+   */
+  valueAtRate(purchases, annualRate, ter, atISO) {
+    const net = Calc.netRate(annualRate, ter);
+    const at = Dates.parse(atISO);
+    return purchases
+      .filter((p) => p.date <= atISO)
+      .reduce((sum, p) => sum + Calc.purchaseCost(p) * Math.pow(1 + net, Dates.daysBetween(Dates.parse(p.date), at) / 365), 0);
   },
 
   /**
@@ -405,7 +440,7 @@ const Store = {
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
       settings: { autoRefresh: true }, // actualisation auto des cours 1×/jour à l'ouverture
       lastAutoRefresh: null,    // date de la dernière actualisation automatique
-      sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2 },
+      sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, useReal: true }, // useReal : partir de mes vrais chiffres
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
       lastExport: null,         // date du dernier export JSON
       theme: 'dark',
@@ -534,7 +569,8 @@ const Store = {
       if (!ins.confirmed && symbol !== tk && ins.isin !== tk) continue;
       instruments[tk] = { isin: ins.isin, mic: ins.mic, symbol, name: String(ins.name || ''), confirmed: !!ins.confirmed };
     }
-    const sim = pickNumbers(data.sim, def.sim, (k, v) => Calc.validSim(k, v));
+    const { useReal: _useReal, ...simNumbers } = def.sim;
+    const sim = { ...pickNumbers(data.sim, simNumbers, (k, v) => Calc.validSim(k, v)), useReal: !(data.sim && data.sim.useReal === false) };
     const plan = pickNumbers(data.plan, def.plan, (k, v) => (k === 'amount' ? v > 0 : v >= 0));
     return {
       state: {
@@ -865,7 +901,7 @@ const Euronext = {
    --------------------------------------------------------------------------
    drawChart(container, { xs, series, xLabel, yFormat, step, stacked })
      xs      : valeurs numériques de l'axe X (timestamps, mois…)
-     series  : [{ name, color (variable CSS), values: [...], area: bool, step: bool }]
+     series  : [{ name, color (variable CSS), values: [...], area: bool, step: bool, dash: bool }]
      step    : tracé en escalier pour toutes les séries (sinon par série)
      stacked : les aires sont empilées (valeur affichée = somme)
    Survol / toucher : ligne verticale + infobulle listant toutes les séries.
@@ -963,7 +999,7 @@ function drawChart(container, opts) {
       }
       svgEl('path', { d, style: `fill: var(${s.color}); fill-opacity: 0.22; stroke: none` }, svg);
     }
-    svgEl('path', { d: line, style: `fill: none; stroke: var(${s.color})`, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+    svgEl('path', { d: line, style: `fill: none; stroke: var(${s.color})${s.dash ? '; stroke-dasharray: 6 4' : ''}`, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
   });
 
   // Couche d'interaction (crosshair + infobulle)
@@ -1698,13 +1734,19 @@ const App = {
     const form = document.getElementById('sim-form');
     App.bindSimulatorValues();
     form.addEventListener('submit', (e) => e.preventDefault());
-    document.getElementById('btn-sim-from-pf').addEventListener('click', () => {
-      const value = Calc.portfolio(App.state.purchases, App.state.prices).value;
-      form.initial.value = Fmt.input(Math.round(value * 100) / 100);
-      form.dispatchEvent(new Event('input'));
-      App.toast(value > 0 ? 'Capital de départ = valeur actuelle' : 'Portefeuille vide pour l\'instant');
+
+    // « Utiliser mes vrais chiffres » : versement mensuel et capital de départ calculés
+    const real = document.getElementById('sim-real');
+    real.addEventListener('change', () => {
+      App.state.sim.useReal = real.checked;
+      App.persist();
+      App.bindSimulatorValues();
+      App.renderSimulator();
+      App.renderSimChart();
     });
-    form.addEventListener('input', App.debounce(() => {
+
+    form.addEventListener('input', App.debounce((e) => {
+      if (e && e.target && e.target.id === 'sim-real') return;
       const v = {
         monthly: Calc.parseNumber(form.monthly.value, true),
         rate: Calc.parseNumber(form.rate.value, true),
@@ -1712,6 +1754,8 @@ const App = {
         initial: Calc.parseNumber(form.initial.value, true),
         ter: Calc.parseNumber(form.ter.value, true),
       };
+      // En mode « vrais chiffres », versement et capital viennent des achats : on garde les valeurs libres
+      if (App.realInputs()) { v.monthly = App.state.sim.monthly; v.initial = App.state.sim.initial; }
       // Saisie incomplète ou hors bornes : on garde le dernier calcul et on le signale
       const LABELS = { monthly: 'Versement mensuel', rate: 'Rendement (entre −100 et 100 %)', years: 'Durée (0 à 80 ans)', initial: 'Capital de départ', ter: 'Frais (0 à 100 %)' };
       const bad = Object.keys(v).filter((k) => !Calc.validSim(k, v[k]));
@@ -1719,20 +1763,46 @@ const App = {
       err.hidden = !bad.length;
       err.textContent = bad.length ? `À corriger : ${bad.map((k) => LABELS[k]).join(', ')}.` : '';
       if (bad.length) return;
-      App.state.sim = v;
+      App.state.sim = { ...v, useReal: App.state.sim.useReal };
       App.persist();
       App.renderSimulator();
       App.renderSimChart();
     }, 200));
   },
 
+  /**
+   * Vrais chiffres (si l'option est active et qu'il y a des achats) :
+   * versement mensuel moyen, valeur actuelle et montant réellement investi.
+   */
+  realInputs() {
+    if (!App.state.sim.useReal) return null;
+    const pace = Calc.realPace(App.state.purchases);
+    if (!pace) return null;
+    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    return { pace, monthly: Math.round(pace.monthly), initial: Math.round(pf.value * 100) / 100, initialInvested: pf.invested, pf };
+  },
+
   simResult() {
     const s = App.state.sim;
-    return Calc.simulate({ monthly: s.monthly, annualRate: s.rate, years: s.years, initial: s.initial, ter: s.ter });
+    const real = App.realInputs();
+    return Calc.simulate({
+      monthly: real ? real.monthly : s.monthly,
+      initial: real ? real.initial : s.initial,
+      initialInvested: real ? real.initialInvested : null,
+      annualRate: s.rate,
+      years: s.years,
+      ter: s.ter,
+    });
   },
 
   renderSimulator() {
+    App.fillRealFields();
+    App.renderRealCompare();
     const r = App.simResult();
+    const real = App.realInputs();
+    document.getElementById('sim-final-label').textContent = real
+      ? `Capital estimé dans ${Fmt.num(App.state.sim.years)} an${App.state.sim.years >= 2 ? 's' : ''}`
+      : 'Capital final estimé';
     document.getElementById('sim-final').textContent = Fmt.eur0(r.final);
     document.getElementById('sim-invested').textContent = Fmt.eur0(r.invested);
     const g = document.getElementById('sim-gains');
@@ -1745,7 +1815,103 @@ const App = {
       : 'Rendement net négatif : le capital final est inférieur aux versements.';
   },
 
+  /** En mode « vrais chiffres », affiche les valeurs calculées dans les champs (non modifiables). */
+  fillRealFields() {
+    const form = document.getElementById('sim-form');
+    const toggle = document.getElementById('sim-real');
+    const hint = document.getElementById('sim-real-hint');
+    const hasPurchases = App.state.purchases.length > 0;
+    toggle.checked = App.state.sim.useReal;
+    toggle.disabled = !hasPurchases;
+    const real = App.realInputs();
+    form.monthly.disabled = !!real;
+    form.initial.disabled = !!real;
+    if (real) {
+      form.monthly.value = Fmt.input(real.monthly);
+      form.initial.value = Fmt.input(real.initial);
+      hint.textContent = `${Fmt.eur0(real.monthly)}/mois en moyenne depuis le ${Fmt.date(real.pace.since)}, départ de votre valeur actuelle (${Fmt.eur(real.initial)}).`;
+    } else {
+      hint.textContent = hasPurchases
+        ? 'Valeur actuelle et versement mensuel moyen, calculés depuis vos achats.'
+        : 'Ajoutez des achats pour partir de vos vrais chiffres.';
+    }
+  },
+
+  /** Carte « Mon DCA réel vs l'hypothèse » : valeur réelle vs valeur au taux choisi. */
+  renderRealCompare() {
+    const card = document.getElementById('real-card');
+    const pace = Calc.realPace(App.state.purchases);
+    card.hidden = !pace;
+    if (!pace) return;
+    const s = App.state.sim;
+    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const today = Dates.today();
+    const expected = Calc.valueAtRate(App.state.purchases, s.rate, s.ter, today);
+    const diff = pf.value - expected;
+    const diffPct = expected > 0 ? diff / expected : 0;
+    const rateTxt = `${Fmt.num(s.rate)} %`;
+
+    document.getElementById('real-pace').textContent =
+      `Depuis le ${Fmt.date(pace.since)} : ${pace.count} achat${pace.count > 1 ? 's' : ''}, ${Fmt.eur(pace.total)} investis, soit ${Fmt.eur0(pace.monthly)}/mois en moyenne.`;
+    document.getElementById('real-value').textContent = Fmt.eur(pf.value);
+    document.getElementById('real-rate-label').textContent = `Au taux de ${rateTxt}`;
+    document.getElementById('real-legend-rate').textContent = `Au taux de ${rateTxt}`;
+    document.getElementById('real-expected').textContent = Fmt.eur(expected);
+
+    const diffEl = document.getElementById('real-diff');
+    if (Math.abs(diffPct) < 0.005) {
+      diffEl.textContent = 'Pile dans l\'hypothèse.';
+      diffEl.className = 'hero-delta real-diff';
+    } else {
+      diffEl.textContent = diff > 0
+        ? `${Fmt.signedEur(diff)} d'avance sur l'hypothèse (${Fmt.signedPct(diffPct)})`
+        : `${Fmt.eur(-diff)} de retard sur l'hypothèse (${Fmt.signedPct(diffPct)})`;
+      diffEl.className = 'hero-delta real-diff ' + Fmt.trend(diff);
+    }
+
+    const net = Calc.netRate(s.rate, s.ter);
+    const xr = Calc.portfolioXirr(App.state.purchases, pf.value);
+    document.getElementById('real-xirr').textContent = xr && xr.rate !== null && xr.days >= 30
+      ? `Rendement réel annualisé : ${Fmt.signedPct(xr.rate)}/an, contre ${Fmt.signedPct(net)}/an dans l'hypothèse (${rateTxt} − frais ${Fmt.num(s.ter)} %).${xr.days < 365 ? ' Moins d\'un an de recul : à prendre avec prudence.' : ''}`
+      : `Hypothèse : ${Fmt.signedPct(net)}/an net de frais. Rendement réel annualisé disponible après 1 mois.`;
+    if (pf.missingQuotes.length) {
+      document.getElementById('real-xirr').textContent += ' Attention : cours manquant pour ' + pf.missingQuotes.join(', ') + '.';
+    }
+  },
+
+  /** Courbe « réel vs hypothèse » (jour par jour, grâce à l'historique des cours). */
+  renderRealChart() {
+    const el = document.getElementById('chart-real');
+    const box = document.getElementById('real-chart-box');
+    const hint = document.getElementById('real-chart-hint');
+    if (document.getElementById('real-card').hidden) return;
+    const vs = Calc.valueSeries(App.state.purchases, App.histories);
+    box.hidden = vs.length < 2;
+    hint.hidden = vs.length >= 2;
+    if (vs.length < 2 || el.offsetParent === null) return;
+    const s = App.state.sim;
+    const pts = vs.map((p) => ({ ...p, atRate: Calc.valueAtRate(App.state.purchases, s.rate, s.ter, p.date) }));
+    drawChart(el, {
+      xs: pts.map((p) => Dates.parse(p.date).getTime()),
+      series: [
+        { name: 'Versé', color: '--series-invested', values: pts.map((p) => p.invested), area: true, step: true },
+        { name: 'Valeur réelle', color: '--series-value', values: pts.map((p) => p.value) },
+        { name: `Au taux de ${Fmt.num(s.rate)} %`, color: '--series-rate', values: pts.map((p) => p.atRate), dash: true },
+      ],
+      xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+      tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+      tooltipRows: (i) => [
+        { name: 'Valeur réelle', color: '--series-value', value: Fmt.eur(pts[i].value) },
+        { name: `Au taux de ${Fmt.num(s.rate)} %`, color: '--series-rate', value: Fmt.eur(pts[i].atRate) },
+        { name: 'Versé', color: '--series-invested', value: Fmt.eur(pts[i].invested) },
+        { name: 'Écart', value: Fmt.signedEur(pts[i].value - pts[i].atRate) },
+      ],
+      yFormat: Fmt.eur,
+    });
+  },
+
   renderSimChart() {
+    App.renderRealChart();
     const el = document.getElementById('chart-sim');
     if (el.offsetParent === null) return;
     const r = App.simResult();

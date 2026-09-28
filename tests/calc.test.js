@@ -282,7 +282,7 @@ test('import : nombres en texte, identifiants en double, réglages invalides', (
   assert.equal(s.purchases[0].price, 6.12);
   assert.equal(s.purchases[0].fees, 0.99);
   assert.notEqual(s.purchases[0].id, s.purchases[1].id);
-  assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3 });
+  assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3, useReal: true });
   assert.deepEqual(s.plan, { amount: 100, fees: 1 });
   assert.deepEqual(s.prices.DCAM, { price: 6.2, date: '', source: 'manuel', at: null });
   assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-01-05', ticker: 'X', qty: Infinity, price: 1 }] }));
@@ -499,4 +499,49 @@ test('stockage : les anciens choix automatiques non exacts sont oubliés', () =>
   }).state;
   assert.deepEqual(Object.keys(s.instruments).sort(), ['DCAM', 'MON ETF']);
   assert.equal(s.instruments['MON ETF'].confirmed, true);
+});
+
+/* ---------- Simulateur : vrais chiffres et comparaison au taux (v1.4.0) ---------- */
+test('rythme réel du DCA', () => {
+  // 3 achats de janvier à mars : 292,58 € sur 3 mois
+  const pace = Calc.realPace(purchases, '2026-09-28');
+  assert.equal(pace.months, 3);
+  close(pace.total, 292.58);
+  close(pace.monthly, 292.58 / 3);
+  assert.equal(pace.count, 3);
+  assert.equal(pace.since, '2026-01-05');
+  // un seul achat : son montant ; achat futur ignoré ; aucun achat : null
+  assert.equal(Calc.realPace([purchases[0]], '2026-09-28').months, 1);
+  assert.equal(Calc.realPace([{ ...purchases[0], date: '2027-01-01' }], '2026-09-28'), null);
+  assert.equal(Calc.realPace([], '2026-09-28'), null);
+});
+
+test('valeur de mes achats au taux de l\'hypothèse', () => {
+  const one = [{ date: '2025-01-01', ticker: 'DCAM', qty: 100, price: 10, fees: 0 }];
+  // 1 000 € placés 365 jours à 7 % → 1 070 € ; avec 0,2 % de frais → ×(1,07 × 0,998)
+  close(Calc.valueAtRate(one, 7, 0, '2026-01-01'), 1070, 1e-9);
+  close(Calc.valueAtRate(one, 7, 0.2, '2026-01-01'), 1000 * 1.07 * 0.998, 1e-9);
+  // le jour même de l'achat : le prix payé (frais inclus) ; achats postérieurs ignorés
+  close(Calc.valueAtRate(purchases, 7, 0.2, '2026-01-05'), 96.99);
+  // plusieurs achats : chacun capitalise depuis sa propre date
+  const at = '2026-03-05';
+  const expected = purchases.reduce((s, p) => s + Calc.purchaseCost(p) * Math.pow(1 + Calc.netRate(7, 0.2), Dates.daysBetween(Dates.parse(p.date), Dates.parse(at)) / 365), 0);
+  close(Calc.valueAtRate(purchases, 7, 0.2, at), expected, 1e-9);
+  close(Calc.netRate(7, 0.2), 1.07 * 0.998 - 1, 1e-12);
+});
+
+test('simulateur : départ de la valeur actuelle, « versé » = vraiment investi', () => {
+  // 1 100 € de valeur pour 1 000 € investis, 100 €/mois pendant 1 an à 0 %
+  const r = Calc.simulate({ monthly: 100, annualRate: 0, years: 1, initial: 1100, initialInvested: 1000 });
+  close(r.final, 2300);
+  close(r.invested, 2200);
+  close(r.gains, 100);
+  assert.equal(r.points[0].invested, 1000);
+  // sans initialInvested : comportement inchangé
+  close(Calc.simulate({ monthly: 0, annualRate: 0, years: 1, initial: 500 }).invested, 500);
+});
+
+test('import : option « vrais chiffres » du simulateur', () => {
+  assert.equal(Store.sanitize({ purchases: [], sim: { useReal: false } }).sim.useReal, false);
+  assert.equal(Store.sanitize({ purchases: [] }).sim.useReal, true);
 });

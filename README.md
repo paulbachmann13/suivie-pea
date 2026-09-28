@@ -3,7 +3,8 @@
 Petite PWA (HTML/CSS/JS vanilla, sans build) pour suivre un PEA en DCA :
 achats, cours en direct (Euronext) et clôture quotidienne, plus-value, PRU, rendement annualisé (TRI),
 courbe valeur / versements, calculateur « prochain achat », versements et cash,
-simulateur d'intérêts composés, compteur des 5 ans et plafond de 150 000 €.
+simulateur d'intérêts composés (à partir de vos vrais chiffres, avec comparaison
+« mon DCA réel vs l'hypothèse de rendement »), compteur des 5 ans et plafond de 150 000 €.
 Les données restent **sur le téléphone** (localStorage) ; export/import JSON pour les sauvegarder.
 
 ## Fichiers

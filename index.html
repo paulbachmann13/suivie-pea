@@ -100,7 +100,34 @@
          3. SIMULATEUR
          ========================================================= -->
     <section id="view-simulator" class="view" data-title="Simulateur" hidden>
+      <!-- Mes vrais achats comparés à l'hypothèse de rendement -->
+      <div class="card" id="real-card" hidden>
+        <h2 class="card-title">Mon DCA réel vs l'hypothèse</h2>
+        <p class="hint" id="real-pace" style="margin-top:0"></p>
+        <div class="split">
+          <div><p class="label"><i class="key-line key-value"></i>Valeur réelle</p><p class="kpi-value" id="real-value"></p></div>
+          <div><p class="label"><i class="key-line key-rate"></i><span id="real-rate-label"></span></p><p class="kpi-value" id="real-expected"></p></div>
+        </div>
+        <p class="hero-delta real-diff" id="real-diff"></p>
+        <p class="hint" id="real-xirr"></p>
+        <div class="real-chart" id="real-chart-box">
+          <div class="legend">
+            <span><i class="key key-invested"></i>Versé</span>
+            <span><i class="key-line key-value"></i>Valeur réelle</span>
+            <span><i class="key-line key-rate"></i><span id="real-legend-rate">Au taux</span></span>
+          </div>
+          <div id="chart-real" class="chart" role="img" aria-label="Valeur réelle de mes achats comparée à l'hypothèse de rendement"></div>
+        </div>
+        <p class="hint" id="real-chart-hint" hidden>La courbe s'affiche pour les titres dont l'historique est publié chaque soir (DCAM).</p>
+      </div>
+
       <form id="sim-form" class="card form" autocomplete="off">
+        <label class="switch-row">
+          <span>Utiliser mes vrais chiffres
+            <small class="hint" id="sim-real-hint">Valeur actuelle et versement mensuel moyen, calculés depuis vos achats.</small>
+          </span>
+          <input type="checkbox" id="sim-real" role="switch">
+        </label>
         <label>Versement mensuel (€)
           <input name="monthly" inputmode="decimal" type="text" required>
         </label>
@@ -117,11 +144,10 @@
           <input name="ter" inputmode="decimal" type="text">
         </label>
         <p class="error" id="sim-error" hidden></p>
-        <button type="button" class="btn" id="btn-sim-from-pf">Partir de mon portefeuille actuel</button>
       </form>
 
       <div class="hero card">
-        <p class="label">Capital final estimé</p>
+        <p class="label" id="sim-final-label">Capital final estimé</p>
         <p class="hero-value" id="sim-final">0,00 €</p>
         <div class="split">
           <div><p class="label"><span class="key key-invested"></span>Versé</p><p class="kpi-value" id="sim-invested">0 €</p></div>
