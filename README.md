@@ -47,8 +47,8 @@ node --test tests/*.test.js
 
 ## Mettre à jour l'appli
 
-Après une modification, incrémentez la version dans `app.js` (`APP_VERSION`)
-**et** dans `sw.js` (`VERSION`) : les téléphones récupèrent alors la nouvelle version,
+Après une modification, incrémentez la version dans `app.js` (`APP_VERSION`),
+dans `sw.js` (`VERSION`) **et** dans les `?v=` d'`index.html` (les tests vérifient qu'elles concordent) : les téléphones récupèrent alors la nouvelle version,
 et le numéro affiché en haut de l'appli permet de vérifier qu'elle est à jour.
 
 ## Cours automatiques

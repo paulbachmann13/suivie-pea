@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.4.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.4.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -726,11 +726,14 @@ QuoteError.MESSAGES = {
   blocked: 'Euronext refuse l\'accès pour le moment (protection anti-robots ?).',
   server: 'Euronext a renvoyé une erreur : réessayez plus tard.',
   format: 'Réponse d\'Euronext illisible (format modifié ?).',
+  busy: 'Euronext est momentanément indisponible : réessayez dans un instant.',
 };
 
 const Euronext = {
   BASE: 'https://live.euronext.com',
   TIMEOUT_MS: 10000,
+  RETRIES: 4,             // essais quand Euronext renvoie sa ligne parasite
+  RETRY_DELAY_MS: 500,    // attente avant le 2e essai, doublée ensuite (0,5 s, 1 s, 2 s)
 
   validIsin(v) { return typeof v === 'string' && /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(v); },
 
@@ -738,7 +741,8 @@ const Euronext = {
    * Appel HTTP avec délai maximal et erreurs traduites en QuoteError.
    * Euronext renvoie parfois, au lieu des données, une ligne de journal
    * parasite (« Can't open /MIDDLELOGS/… ») : on la retire, et si rien
-   * d'autre n'est arrivé, on réessaie (jusqu'à 3 fois).
+   * d'autre n'est arrivé, on réessaie (jusqu'à RETRIES fois, attente croissante :
+   * constaté en réel, le raté peut durer plus d'une seconde).
    */
   async get(url, fetchFn = fetch) {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) throw new QuoteError('offline');
@@ -758,8 +762,8 @@ const Euronext = {
       if (!res.ok) throw new QuoteError('server', 'HTTP ' + res.status);
       const text = Euronext.stripJunk(await res.text());
       if (text.trim()) return text;
-      if (attempt >= 3) throw new QuoteError('format', 'réponse vide ou parasite');
-      await new Promise((ok) => setTimeout(ok, 400 * attempt));
+      if (attempt >= Euronext.RETRIES) throw new QuoteError('busy', 'réponse vide ou parasite');
+      await new Promise((ok) => setTimeout(ok, Euronext.RETRY_DELAY_MS * 2 ** (attempt - 1)));
     }
   },
 
@@ -1059,6 +1063,9 @@ const App = {
   lastQuoteFetch: 0,
 
   init() {
+    // Version affichée en premier : visible même si la suite du démarrage échoue
+    document.getElementById('version-badge').textContent = `v${APP_VERSION}`;
+    document.getElementById('app-version').textContent = `Suivi PEA v${APP_VERSION} — cours : Euronext en direct, secours ${ACTIVE_PROVIDER.label.toLowerCase()}`;
     App.state = Store.load();
     App.histories = App.loadHistories();
     App.applyTheme();
@@ -1070,8 +1077,6 @@ const App = {
     App.bindBanners();
     App.renderAll();
     window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
-    document.getElementById('app-version').textContent = `Suivi PEA v${APP_VERSION} — cours : Euronext en direct, secours ${ACTIVE_PROVIDER.label.toLowerCase()}`;
-    document.getElementById('version-badge').textContent = `v${APP_VERSION}`;
 
     // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)
     // Cours : d'abord la clôture publiée par la GitHub Action (historique du

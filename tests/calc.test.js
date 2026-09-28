@@ -250,6 +250,15 @@ test('script GitHub Action : lecture de la réponse Yahoo', () => {
   assert.throws(() => parseChart({ chart: { result: null, error: { code: 'Not Found' } } }));
 });
 
+test('adresses versionnées identiques dans index.html (cache de GitHub Pages)', () => {
+  const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.html'), 'utf8');
+  assert.ok(html.includes(`src="app.js?v=${APP_VERSION}"`), 'index.html doit charger app.js?v=' + APP_VERSION);
+  assert.ok(html.includes(`href="style.css?v=${APP_VERSION}"`), 'index.html doit charger style.css?v=' + APP_VERSION);
+  const sw = require('fs').readFileSync(require('path').join(__dirname, '..', 'sw.js'), 'utf8');
+  assert.match(sw, /'\.\/app\.js\?v=' \+ VERSION/);
+  assert.match(sw, /'\.\/style\.css\?v=' \+ VERSION/);
+});
+
 test('version identique dans app.js et sw.js', () => {
   const sw = require('fs').readFileSync(require('path').join(__dirname, '..', 'sw.js'), 'utf8');
   const m = sw.match(/const VERSION = '([^']+)'/);
@@ -475,13 +484,21 @@ test('réponse parasite d\'Euronext : on réessaie', async () => {
     const body = n === 1 ? junk : url.includes('instrumentSearch') ? FIX('euronext-search-psp5.json') : FIX('euronext-history-psp5.csv');
     return { ok: true, status: 200, text: async () => body };
   };
+  const saved0 = Euronext.RETRY_DELAY_MS;
+  Euronext.RETRY_DELAY_MS = 1;
   const q = await Euronext.quote('PSP5', null, f);
+  Euronext.RETRY_DELAY_MS = saved0;
   assert.equal(q.price, 59.37);
   assert.equal(n, 3, '1 réponse parasite + recherche + historique');
   // parasite collé devant les données : retiré
   assert.equal(Euronext.stripJunk(junk + '\n[1]'), '[1]');
-  // toujours parasite → erreur claire après 3 essais
-  await assert.rejects(Euronext.quote('PSP5', null, async () => ({ ok: true, status: 200, text: async () => junk })), { code: 'format' });
+  // toujours parasite → « momentanément indisponible » après RETRIES essais
+  const saved = Euronext.RETRY_DELAY_MS;
+  Euronext.RETRY_DELAY_MS = 1;
+  let calls = 0;
+  await assert.rejects(Euronext.quote('PSP5', null, async () => { calls++; return { ok: true, status: 200, text: async () => junk }; }), { code: 'busy' });
+  assert.equal(calls, Euronext.RETRIES);
+  Euronext.RETRY_DELAY_MS = saved;
 });
 
 test('HTTP 404 : erreur serveur (et non « introuvable »)', async () => {
