@@ -1,7 +1,7 @@
 /* Tests des calculs — lancer avec : node --test tests/ */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Calc, Dates, Store, Fmt, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls } = require('../app.js');
+const { Calc, Dates, Store, Fmt, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls, Euronext, QuoteError } = require('../app.js');
 const { parseChart } = require('../tools/fetch-prices.js');
 
 const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≠ ${b}`);
@@ -222,7 +222,7 @@ test('fichier de cours : lecture et fusion avec les cours saisis', () => {
   assert.equal(p1.DCAM.price, 6.2);
   const p2 = { DCAM: { price: 6.0, date: '2026-09-20', source: 'manuel' } };
   assert.equal(mergeQuotes(p2, parsed.quotes), 1);
-  assert.deepEqual(p2.DCAM, { price: 6.17, date: '2026-09-24', source: 'auto' });
+  assert.deepEqual(p2.DCAM, { price: 6.17, date: '2026-09-24', source: 'auto', at: null });
   // cours auto déjà identique : rien à faire
   assert.equal(mergeQuotes(p2, parsed.quotes), 0);
 });
@@ -284,7 +284,7 @@ test('import : nombres en texte, identifiants en double, réglages invalides', (
   assert.notEqual(s.purchases[0].id, s.purchases[1].id);
   assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3 });
   assert.deepEqual(s.plan, { amount: 100, fees: 1 });
-  assert.deepEqual(s.prices.DCAM, { price: 6.2, date: '', source: 'manuel' });
+  assert.deepEqual(s.prices.DCAM, { price: 6.2, date: '', source: 'manuel', at: null });
   assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-01-05', ticker: 'X', qty: Infinity, price: 1 }] }));
 });
 
@@ -313,4 +313,113 @@ test('simulateur : bornes des paramètres', () => {
   assert.equal(Calc.validSim('years', 81), false);
   assert.equal(Calc.validSim('monthly', -1), false);
   assert.ok(Number.isFinite(Calc.simulate({ monthly: 100, annualRate: -99, years: 10 }).final));
+});
+
+/* ---------- Cours en direct (Euronext) ---------- */
+const fs = require('fs');
+const path = require('path');
+const FIX = (f) => fs.readFileSync(path.join(__dirname, 'fixtures', f), 'utf8');
+
+/** Faux fetch : répond selon l'URL, et note les appels. */
+function fakeFetch(routes) {
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    for (const [pattern, reply] of routes) {
+      if (url.includes(pattern)) {
+        if (reply instanceof Error) throw reply;
+        const { status = 200, body = '' } = reply;
+        return { ok: status >= 200 && status < 300, status, text: async () => body };
+      }
+    }
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('Euronext : ticker PSP5 → ISIN, place et nom (réponse réelle)', () => {
+  const ins = Euronext.pickInstrument(JSON.parse(FIX('euronext-search-psp5.json')), 'psp5');
+  assert.deepEqual(ins, { isin: 'FR0011871128', mic: 'XPAR', symbol: 'PSP5', name: 'Amundi PEA S&P 500 UCITS ETF Acc' });
+  assert.equal(Euronext.pickInstrument([{ label: 'See all results', isin: '', mic: '' }], 'X'), null);
+  // priorité au ticker exact, puis à Paris
+  const many = [
+    { isin: 'NL0000000001', mic: 'XAMS', label: "<span class='symbol'>PSP5</span>" },
+    { isin: 'FR0000000002', mic: 'XPAR', label: "<span class='symbol'>PSP</span>" },
+    { isin: 'FR0011871128', mic: 'XPAR', label: "<span class='symbol'>PSP5</span>" },
+  ];
+  assert.equal(Euronext.pickInstrument(many, 'PSP5').isin, 'FR0011871128');
+});
+
+test('Euronext : lecture du CSV d\'historique (réponse réelle)', () => {
+  assert.deepEqual(Euronext.parseHistoryCsv(FIX('euronext-history-psp5.csv')), { date: '2026-09-28', price: 59.37 });
+  // clôture vide → dernier cours ; lignes parasites ignorées
+  const csv = "Can't open log\nDate;Open;High;Low;Last;Close\n29/09/2026;1;1;1;60.10;\n";
+  assert.deepEqual(Euronext.parseHistoryCsv(csv), { date: '2026-09-29', price: 60.1 });
+  assert.equal(Euronext.parseHistoryCsv('Date;Open\n'), null);
+});
+
+test('Euronext : cours de PSP5 par ticker et par ISIN', async () => {
+  const f = fakeFetch([
+    ['instrumentSearch', { body: FIX('euronext-search-psp5.json') }],
+    ['getFullDownloadAjax/FR0011871128-XPAR', { body: FIX('euronext-history-psp5.csv') }],
+  ]);
+  for (const query of ['PSP5', 'FR0011871128']) {
+    const q = await Euronext.quote(query, null, f);
+    assert.equal(q.price, 59.37);
+    assert.equal(q.date, '2026-09-28');
+    assert.equal(q.instrument.isin, 'FR0011871128');
+    assert.ok(!Number.isNaN(Date.parse(q.at)));
+  }
+  assert.match(f.calls[0], /q=PSP5/);
+  assert.match(f.calls[1], /format=csv/);
+  // instrument déjà connu : pas de nouvelle recherche
+  const g = fakeFetch([['getFullDownloadAjax', { body: FIX('euronext-history-psp5.csv') }]]);
+  await Euronext.quote('PSP5', { isin: 'FR0011871128', mic: 'XPAR' }, g);
+  assert.equal(g.calls.length, 1);
+});
+
+test('Euronext : erreurs traduites en messages clairs', async () => {
+  const code = async (routes, known = null) => {
+    try { await Euronext.quote('PSP5', known, fakeFetch(routes)); return 'ok'; } catch (e) { assert.ok(e instanceof QuoteError); return e.code; }
+  };
+  assert.equal(await code([['instrumentSearch', { body: '[]' }]]), 'notfound');
+  assert.equal(await code([['instrumentSearch', { status: 429 }]]), 'quota');
+  assert.equal(await code([['instrumentSearch', { status: 503 }]]), 'server');
+  assert.equal(await code([['instrumentSearch', { status: 403 }]]), 'blocked');
+  assert.equal(await code([['instrumentSearch', { body: '<html>' }]]), 'format');
+  assert.equal(await code([['instrumentSearch', new TypeError('Failed to fetch')]]), 'network');
+  const abort = new Error('aborted'); abort.name = 'AbortError';
+  assert.equal(await code([['instrumentSearch', abort]]), 'timeout');
+  assert.equal(await code([
+    ['instrumentSearch', { body: FIX('euronext-search-psp5.json') }],
+    ['getFullDownloadAjax', { body: 'Date;Open;High;Low;Last;Close\n' }],
+  ]), 'noprice');
+  // instrument mémorisé périmé → nouvelle recherche, puis succès
+  assert.equal(await code([
+    ['getFullDownloadAjax/XX0000000000', { body: 'Date;Open;High;Low;Last;Close\n' }],
+    ['instrumentSearch', { body: FIX('euronext-search-psp5.json') }],
+    ['getFullDownloadAjax/FR0011871128', { body: FIX('euronext-history-psp5.csv') }],
+  ], { isin: 'XX0000000000', mic: 'XPAR' }), 'ok');
+  assert.match(new QuoteError('quota').message, /Trop de demandes/);
+});
+
+test('import : instruments et réglages', () => {
+  const s = Store.sanitize({
+    purchases: [],
+    instruments: { psp5: { isin: 'FR0011871128', mic: 'XPAR', symbol: 'PSP5', name: 'x' }, bad: { isin: '123', mic: 'XPAR' } },
+    settings: { autoRefresh: false },
+    prices: { PSP5: { price: 59.37, date: '2026-09-28', source: 'euronext', at: '2026-09-28T16:17:00.000Z' } },
+  });
+  assert.deepEqual(Object.keys(s.instruments), ['PSP5']);
+  assert.equal(s.settings.autoRefresh, false);
+  assert.equal(s.prices.PSP5.source, 'euronext');
+  assert.equal(s.prices.PSP5.at, '2026-09-28T16:17:00.000Z');
+  assert.equal(Store.defaults().settings.autoRefresh, true);
+});
+
+test('horodatage au format français', () => {
+  const iso = new Date(2026, 8, 28, 18, 7).toISOString();
+  assert.equal(Fmt.dateTime(iso), '28/09/2026 à 18:07');
+  assert.equal(Fmt.dateTime(null), '');
 });

@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.2.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.3.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -49,6 +49,13 @@ const Fmt = (() => {
       if (!iso) return '—';
       const [y, m, d] = iso.split('-');
       return `${d}/${m}/${y}`;
+    },
+    /** Horodatage ISO → 'JJ/MM/AAAA à HH:MM' (heure locale) */
+    dateTime: (iso) => {
+      const d = new Date(iso);
+      if (!iso || Number.isNaN(d.getTime())) return '';
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} à ${p(d.getHours())}:${p(d.getMinutes())}`;
     },
     /** 'AAAA-MM-JJ' → 'mars 2026' (axes des graphiques) */
     monthYear: (iso) => {
@@ -394,7 +401,10 @@ const Store = {
       openingDate: Dates.today(),
       purchases: [],            // [{id, date, ticker, qty, price, fees}]
       deposits: [],             // versements sur le PEA [{id, date, amount}]
-      prices: {},               // { TICKER: {price, date, source} }
+      prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
+      instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
+      settings: { autoRefresh: true }, // actualisation auto des cours 1×/jour à l'ouverture
+      lastAutoRefresh: null,    // date de la dernière actualisation automatique
       sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2 },
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
       lastExport: null,         // date du dernier export JSON
@@ -501,7 +511,8 @@ const Store = {
         prices[Calc.normTicker(t)] = {
           price,
           date: Dates.isValidISO(q.date) ? q.date : '',
-          source: q.source === 'auto' ? 'auto' : 'manuel',
+          source: ['auto', 'euronext'].includes(q.source) ? q.source : 'manuel',
+          at: typeof q.at === 'string' && !Number.isNaN(Date.parse(q.at)) ? q.at : null,
         };
       }
     }
@@ -514,6 +525,12 @@ const Store = {
       }
       return out;
     };
+    const instruments = {};
+    for (const [t, ins] of Object.entries(data.instruments && typeof data.instruments === 'object' ? data.instruments : {})) {
+      if (ins && Euronext.validIsin(ins.isin) && /^[A-Z]{4}$/.test(ins.mic)) {
+        instruments[Calc.normTicker(t)] = { isin: ins.isin, mic: ins.mic, symbol: String(ins.symbol || ''), name: String(ins.name || '') };
+      }
+    }
     const sim = pickNumbers(data.sim, def.sim, (k, v) => Calc.validSim(k, v));
     const plan = pickNumbers(data.plan, def.plan, (k, v) => (k === 'amount' ? v > 0 : v >= 0));
     return {
@@ -523,6 +540,9 @@ const Store = {
         purchases,
         deposits,
         prices,
+        instruments,
+        settings: { autoRefresh: !(data.settings && data.settings.autoRefresh === false) },
+        lastAutoRefresh: Dates.isValidISO(data.lastAutoRefresh) ? data.lastAutoRefresh : null,
         sim,
         plan,
         lastExport: Dates.isValidISO(data.lastExport) ? data.lastExport : null,
@@ -596,7 +616,7 @@ const PriceProviders = {
   /** Cours de clôture publiés par la GitHub Action dans data/prices.json. */
   githubAction: {
     id: 'auto',
-    label: 'Automatique (clôture Euronext)',
+    label: 'Clôture quotidienne (GitHub Action)',
     auto: true,
     async load() {
       for (const url of priceUrls()) {
@@ -620,17 +640,165 @@ const ACTIVE_PROVIDER = PriceProviders.githubAction;
  * jour ou plus tard est conservé.
  * @returns nombre de cours mis à jour
  */
-function mergeQuotes(prices, quotes, source = 'auto') {
+function mergeQuotes(prices, quotes, source = 'auto', at = null) {
   let n = 0;
   for (const [t, q] of Object.entries(quotes)) {
     const cur = prices[t];
     if (!cur || q.date > cur.date || (cur.source === source && (q.date !== cur.date || q.price !== cur.price))) {
-      prices[t] = { price: q.price, date: q.date, source };
+      prices[t] = { price: q.price, date: q.date, source, at: q.at || at || null };
       n++;
     }
   }
   return n;
 }
+
+/* ==========================================================================
+   4 bis. COURS EN DIRECT — EURONEXT
+   --------------------------------------------------------------------------
+   Pourquoi Euronext ? C'est la place de cotation des ETF PEA (Paris), et deux
+   de ses points d'accès publics, ceux qu'utilise son propre site, sont
+   appelables depuis le navigateur (en-tête CORS « * »), sans clé ni proxy :
+     1. recherche  : /en/instrumentSearch/searchJSON?q=PSP5  → ISIN + place (MIC)
+     2. historique : /en/ajax/AwlHistoricalPrice/getFullDownloadAjax/<ISIN>-<MIC>
+                     ?format=csv…  → CSV des dernières séances (dernier cours)
+   Yahoo Finance et Stooq, eux, refusent les appels depuis une page web (CORS)
+   et les proxys CORS gratuits sont en panne ou payants (testés en 09/2026).
+   Ces points d'accès ne sont pas une API officielle : s'ils changent, seule
+   cette section est à adapter ; l'appli retombe entre-temps sur le cours de
+   clôture de la GitHub Action, puis sur la saisie manuelle.
+   ========================================================================== */
+
+/** Erreur de récupération de cours, avec un code pour choisir le message. */
+class QuoteError extends Error {
+  constructor(code, detail) {
+    super(QuoteError.MESSAGES[code] || detail || 'Erreur inconnue');
+    this.code = code;
+    this.detail = detail || '';
+  }
+}
+QuoteError.MESSAGES = {
+  offline: 'Pas de connexion internet.',
+  timeout: 'Euronext ne répond pas (délai dépassé).',
+  network: 'Euronext est injoignable pour le moment.',
+  notfound: 'Titre introuvable sur Euronext : vérifiez le ticker ou l\'ISIN.',
+  noprice: 'Aucun cours récent publié par Euronext pour ce titre.',
+  quota: 'Trop de demandes envoyées à Euronext : réessayez dans quelques minutes.',
+  blocked: 'Euronext refuse l\'accès pour le moment (protection anti-robots ?).',
+  server: 'Euronext a renvoyé une erreur : réessayez plus tard.',
+  format: 'Réponse d\'Euronext illisible (format modifié ?).',
+};
+
+const Euronext = {
+  BASE: 'https://live.euronext.com',
+  TIMEOUT_MS: 10000,
+
+  validIsin(v) { return typeof v === 'string' && /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(v); },
+
+  /** Appel HTTP avec délai maximal et erreurs traduites en QuoteError. */
+  async get(url, fetchFn = fetch) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) throw new QuoteError('offline');
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl && setTimeout(() => ctrl.abort(), Euronext.TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetchFn(url, { cache: 'no-store', signal: ctrl && ctrl.signal });
+    } catch (e) {
+      throw new QuoteError(e && e.name === 'AbortError' ? 'timeout' : 'network', e && e.message);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (res.status === 429) throw new QuoteError('quota');
+    if (res.status === 401 || res.status === 403) throw new QuoteError('blocked', 'HTTP ' + res.status);
+    if (res.status === 404) throw new QuoteError('notfound');
+    if (!res.ok) throw new QuoteError('server', 'HTTP ' + res.status);
+    return res.text();
+  },
+
+  /**
+   * Choisit l'instrument dans la réponse de la recherche Euronext.
+   * Priorité : ticker ou ISIN identique, puis cotation à Paris (XPAR).
+   * @returns {{isin, mic, symbol, name}} ou null
+   */
+  pickInstrument(json, query) {
+    if (!Array.isArray(json)) return null;
+    const q = String(query || '').trim().toUpperCase();
+    const decode = (h) => String(h || '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&#0?39;|&apos;/g, "'").trim();
+    const items = json
+      .filter((it) => it && Euronext.validIsin(it.isin) && /^[A-Z]{4}$/.test(it.mic))
+      .map((it) => {
+        const label = String(it.label || '');
+        const sym = (label.match(/class='symbol'>([^<]+)</) || [])[1] || '';
+        const name = (label.match(/<a [^>]*>([^<]+)<\/a>/) || [])[1] || it.name || '';
+        return { isin: it.isin, mic: it.mic, symbol: decode(sym).toUpperCase(), name: decode(name) };
+      });
+    const score = (it) => (it.symbol === q || it.isin === q ? 2 : 0) + (it.mic === 'XPAR' ? 1 : 0);
+    items.sort((a, b) => score(b) - score(a));
+    return items[0] || null;
+  },
+
+  /**
+   * Lit le CSV d'historique Euronext et renvoie la séance la plus récente.
+   * Format : lignes « JJ/MM/AAAA;Ouv;Haut;Bas;Dernier;Clôture;… » (point décimal).
+   * @returns {{price, date: 'AAAA-MM-JJ'}} ou null
+   */
+  parseHistoryCsv(text) {
+    let best = null;
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const cols = line.replace(/^\uFEFF/, '').split(';');
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((cols[0] || '').trim());
+      if (!m) continue;
+      const date = `${m[3]}-${m[2]}-${m[1]}`;
+      const close = parseFloat(cols[5]);
+      const last = parseFloat(cols[4]);
+      const price = close > 0 ? close : last > 0 ? last : NaN;
+      if (Dates.isValidISO(date) && price > 0 && (!best || date > best.date)) best = { date, price };
+    }
+    return best;
+  },
+
+  /** Trouve l'ISIN et la place d'un ticker ou d'un ISIN. */
+  async resolve(query, fetchFn = fetch) {
+    const text = await Euronext.get(`${Euronext.BASE}/en/instrumentSearch/searchJSON?q=${encodeURIComponent(query)}`, fetchFn);
+    let json;
+    try { json = JSON.parse(text); } catch (e) { throw new QuoteError('format', 'recherche'); }
+    const ins = Euronext.pickInstrument(json, query);
+    if (!ins) throw new QuoteError('notfound');
+    return ins;
+  },
+
+  /** Dernier cours d'un instrument (séances des 15 derniers jours). */
+  async lastPrice(ins, fetchFn = fetch, today = new Date()) {
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 15);
+    const url = `${Euronext.BASE}/en/ajax/AwlHistoricalPrice/getFullDownloadAjax/${ins.isin}-${ins.mic}` +
+      `?format=csv&decimal_separator=.&date_form=d/m/Y&op=&adjusted=Y&base100=` +
+      `&startdate=${Dates.toISO(start)}&enddate=${Dates.toISO(today)}`;
+    const text = await Euronext.get(url, fetchFn);
+    if (!/Date;/.test(text)) throw new QuoteError('format', 'historique');
+    const last = Euronext.parseHistoryCsv(text);
+    if (!last) throw new QuoteError('noprice');
+    return last;
+  },
+
+  /**
+   * Cours actuel d'un titre suivi.
+   * @param ticker  ticker (PSP5) ou ISIN (FR0011871128)
+   * @param known   instrument déjà résolu (évite une recherche)
+   * @returns {{price, date, at, instrument}}
+   */
+  async quote(ticker, known = null, fetchFn = fetch) {
+    let ins = known && Euronext.validIsin(known.isin) ? known : await Euronext.resolve(ticker, fetchFn);
+    let last;
+    try {
+      last = await Euronext.lastPrice(ins, fetchFn);
+    } catch (e) {
+      // Instrument mémorisé qui ne répond plus (radiation, changement de place…) : nouvelle recherche
+      if (!known || !(e instanceof QuoteError) || !['notfound', 'noprice'].includes(e.code)) throw e;
+      ins = await Euronext.resolve(ticker, fetchFn);
+      last = await Euronext.lastPrice(ins, fetchFn);
+    }
+    return { ...last, at: new Date().toISOString(), instrument: ins };
+  },
+};
 
 /* ==========================================================================
    5. GRAPHIQUES SVG MAISON
@@ -806,13 +974,17 @@ const App = {
     App.bindBanners();
     App.renderAll();
     window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
-    document.getElementById('app-version').textContent = `Suivi PEA v${APP_VERSION} — cours : ${ACTIVE_PROVIDER.label.toLowerCase()}`;
+    document.getElementById('app-version').textContent = `Suivi PEA v${APP_VERSION} — cours : Euronext en direct, secours ${ACTIVE_PROVIDER.label.toLowerCase()}`;
     document.getElementById('version-badge').textContent = `v${APP_VERSION}`;
 
     // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)
-    App.refreshQuotes({ silent: true });
+    // Cours : d'abord la clôture publiée par la GitHub Action (historique du
+    // graphique + secours), puis le cours Euronext une fois par jour si activé
+    App.refreshQuotes({ silent: true }).finally(App.maybeAutoRefresh);
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && Date.now() - App.lastQuoteFetch > 30 * 60 * 1000) App.refreshQuotes({ silent: true });
+      if (document.hidden) return;
+      if (Date.now() - App.lastQuoteFetch > 30 * 60 * 1000) App.refreshQuotes({ silent: true });
+      App.maybeAutoRefresh(); // l'appli peut rester ouverte en arrière-plan plusieurs jours
     });
 
     App.registerServiceWorker();
@@ -864,8 +1036,9 @@ const App = {
         setTimeout(() => location.reload(), 8000); // filet de sécurité
         return;
       }
-      const ok = await App.refreshQuotes({ silent: true });
-      App.toast(`Appli à jour (v${APP_VERSION})${ok ? ' · cours actualisés' : ' · cours indisponibles'}`);
+      await App.refreshQuotes({ silent: true });
+      const { ok, total } = await App.refreshAllLive({ silent: true, force: true });
+      App.toast(`Appli à jour (v${APP_VERSION})` + (total ? (ok === total ? ' · cours actualisés' : ` · ${ok}/${total} cours actualisé(s)`) : ''));
     } catch (e) {
       console.warn('Actualisation impossible', e);
       App.toast('Actualisation impossible (hors ligne ?)');
@@ -988,7 +1161,7 @@ const App = {
     const warn = document.getElementById('kpi-warning');
     warn.hidden = !pf.missingQuotes.length;
     warn.textContent = pf.missingQuotes.length
-      ? `Cours non saisi pour ${pf.missingQuotes.join(', ')} : valorisé au dernier prix d'achat.`
+      ? `Pas de cours pour ${pf.missingQuotes.join(', ')} : valorisé au dernier prix d'achat. Touchez « Actualiser le cours ».`
       : '';
 
     // Une carte par titre, avec saisie du cours actuel.
@@ -1010,32 +1183,56 @@ const App = {
       card.className = 'card';
       card.innerHTML = `
         <div class="position-head"><strong></strong><span class="${cls(pos.pv)}"></span></div>
+        <p class="position-name" data-f="name"></p>
         <div class="position-grid">
           <div>Parts<b data-f="qty"></b></div>
           <div>PRU<b data-f="pru"></b></div>
           <div>Investi<b data-f="invested"></b></div>
           <div>Valeur<b data-f="value"></b></div>
         </div>
+        <div class="quote-box">
+          <div class="quote-main">
+            <b class="quote-price" data-f="price"></b>
+            <span class="hint quote-meta" data-f="meta"></span>
+          </div>
+          <button class="btn btn-small btn-live" type="button" data-a="live"></button>
+        </div>
+        <p class="quote-error" data-f="error" role="alert" hidden></p>
         <form class="price-row" autocomplete="off">
-          <label>Cours actuel (€)
+          <label>Corriger à la main (€)
             <input type="text" inputmode="decimal" name="price" enterkeyhint="done">
           </label>
-          <button class="btn btn-primary btn-small" type="submit">OK</button>
-        </form>
-        <p class="hint" data-f="quote"></p>`;
+          <button class="btn btn-small" type="submit">OK</button>
+        </form>`;
       // textContent pour les données saisies (jamais d'innerHTML avec des données)
+      const q = App.state.prices[pos.ticker];
+      const ins = App.state.instruments[pos.ticker];
+      const status = App.liveStatus[pos.ticker] || {};
       card.querySelector('.position-head strong').textContent = pos.ticker;
       card.querySelector('.position-head span').textContent = `${Fmt.signedEur(pos.pv)} · ${Fmt.signedPct(pos.pvPct)}`;
+      const nameEl = card.querySelector('[data-f=name]');
+      nameEl.textContent = ins ? `${ins.name}${ins.symbol && ins.symbol !== pos.ticker ? ' · ' + ins.symbol : ''} · ${ins.isin}` : '';
+      nameEl.hidden = !ins;
       card.querySelector('[data-f=qty]').textContent = Fmt.num(pos.qty);
       card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pru);
       card.querySelector('[data-f=invested]').textContent = Fmt.eur(pos.invested);
       card.querySelector('[data-f=value]').textContent = Fmt.eur(pos.value);
-      const src = (App.state.prices[pos.ticker] || {}).source;
-      card.querySelector('[data-f=quote]').textContent = !pos.hasQuote
-        ? `Aucun cours (dernier prix d'achat : ${Fmt.unitPrice(pos.lastPrice)})`
-        : src === 'auto'
-          ? `Cours de clôture du ${Fmt.date(pos.quoteDate)} (automatique)`
-          : `Cours saisi le ${Fmt.date(pos.quoteDate)}`;
+      card.querySelector('[data-f=price]').textContent = pos.hasQuote ? Fmt.unitPrice(pos.currentPrice) : '—';
+      card.querySelector('[data-f=meta]').textContent = App.quoteMeta(q, pos);
+
+      // Bouton « Actualiser le cours » (Euronext)
+      const live = card.querySelector('[data-a=live]');
+      live.textContent = status.loading ? 'Récupération…' : '↻ Actualiser le cours';
+      live.disabled = !!status.loading;
+      live.addEventListener('click', () => App.refreshLive(pos.ticker, { force: true, announce: true }));
+
+      // Échec : message clair, la saisie manuelle reste disponible juste en dessous
+      const errEl = card.querySelector('[data-f=error]');
+      errEl.hidden = !status.error;
+      if (status.error) {
+        errEl.textContent = `${status.error} ${pos.hasQuote ? 'Le dernier cours connu est conservé. ' : ''}Vous pouvez saisir le cours à la main ci-dessous.`;
+      }
+
       const input = card.querySelector('input');
       input.dataset.ticker = pos.ticker;
       input.value = pos.hasQuote ? Fmt.input(pos.currentPrice) : '';
@@ -1051,13 +1248,22 @@ const App = {
       }
     }
 
-    if (ACTIVE_PROVIDER.auto) {
-      const btn = document.createElement('button');
-      btn.className = 'btn';
-      btn.textContent = '↻ Actualiser les cours';
-      btn.addEventListener('click', () => App.refreshQuotes({ silent: false }));
-      box.appendChild(btn);
-    }
+    // Tout actualiser d'un coup
+    const all = document.createElement('button');
+    all.className = 'btn';
+    all.textContent = '↻ Actualiser tous les cours';
+    all.disabled = Object.values(App.liveStatus).some((st) => st.loading);
+    all.addEventListener('click', () => App.refreshAllLive({ silent: false, force: true }));
+    box.appendChild(all);
+  },
+
+  /** Texte sous le prix : séance, date et heure de mise à jour, source. */
+  quoteMeta(q, pos) {
+    if (!q || !(q.price > 0)) return `Pas encore de cours · dernier prix d'achat ${Fmt.unitPrice(pos.lastPrice)}`;
+    const at = Fmt.dateTime(q.at);
+    if (q.source === 'euronext') return `Séance du ${Fmt.date(q.date)} · actualisé le ${at} · Euronext`;
+    if (q.source === 'auto') return `Clôture du ${Fmt.date(q.date)}${at ? ` · reçue le ${at}` : ''} · GitHub (Yahoo)`;
+    return `Saisi à la main le ${at || Fmt.date(q.date)}`;
   },
 
   setPrice(ticker, raw) {
@@ -1068,11 +1274,70 @@ const App = {
       App.toast('Cours invalide');
       return;
     } else {
-      App.state.prices[ticker] = { price, date: Dates.today(), source: 'manuel' };
+      App.state.prices[ticker] = { price, date: Dates.today(), source: 'manuel', at: new Date().toISOString() };
     }
+    delete App.liveStatus[ticker];
     App.persist();
     App.renderAll();
     App.toast('Cours enregistré');
+  },
+
+  /* ---------- Cours en direct (Euronext) ---------- */
+  liveStatus: {}, // { TICKER: {loading} | {error, code} } — non enregistré
+
+  /**
+   * Récupère le cours d'un titre sur Euronext.
+   * @param force  true (bouton) : remplace toujours le cours enregistré ;
+   *               false (automatique) : ne remplace pas une saisie manuelle
+   *               du même jour ou plus récente.
+   * @returns true si un cours a été obtenu
+   */
+  async refreshLive(ticker, { force = true, announce = false } = {}) {
+    if ((App.liveStatus[ticker] || {}).loading) return false;
+    App.liveStatus[ticker] = { loading: true };
+    App.renderDashboard();
+    try {
+      const q = await Euronext.quote(ticker, App.state.instruments[ticker]);
+      App.state.instruments[ticker] = q.instrument;
+      const cur = App.state.prices[ticker];
+      if (force || !cur || cur.source !== 'manuel' || q.date > cur.date) {
+        App.state.prices[ticker] = { price: q.price, date: q.date, source: 'euronext', at: q.at };
+      }
+      App.liveStatus[ticker] = {};
+      App.persist();
+      if (announce) App.toast(`${ticker} : ${Fmt.unitPrice(q.price)} (séance du ${Fmt.date(q.date)})`);
+      return true;
+    } catch (e) {
+      const err = e instanceof QuoteError ? e : new QuoteError('network', e && e.message);
+      if (err.code === 'notfound') delete App.state.instruments[ticker];
+      App.liveStatus[ticker] = { error: err.message, code: err.code };
+      console.warn('Cours indisponible', ticker, err.code, err.detail);
+      return false;
+    } finally {
+      App.renderAll();
+    }
+  },
+
+  /** Actualise tous les titres, l'un après l'autre (pour ménager Euronext). */
+  async refreshAllLive({ silent = false, force = true } = {}) {
+    const tickers = Calc.portfolio(App.state.purchases).positions.map((p) => p.ticker);
+    let ok = 0;
+    for (const t of tickers) if (await App.refreshLive(t, { force })) ok++;
+    if (!silent && tickers.length) {
+      App.toast(ok === tickers.length ? 'Cours actualisés' : `${ok}/${tickers.length} cours actualisé(s) : voir le message sous le titre`);
+    }
+    return { ok, total: tickers.length };
+  },
+
+  /** Actualisation automatique : une fois par jour, à l'ouverture (désactivable). */
+  async maybeAutoRefresh() {
+    const s = App.state;
+    if (!s.settings.autoRefresh || s.lastAutoRefresh === Dates.today() || !s.purchases.length) return;
+    const { ok } = await App.refreshAllLive({ silent: true, force: false });
+    if (ok > 0) {
+      s.lastAutoRefresh = Dates.today();
+      App.persist();
+    }
   },
 
   /** Charge les cours du fournisseur actif et les fusionne avec les cours saisis. */
@@ -1085,7 +1350,7 @@ const App = {
       if (!silent) App.toast('Cours indisponibles (hors ligne ?)');
       return false;
     }
-    const n = mergeQuotes(App.state.prices, data.quotes, ACTIVE_PROVIDER.id);
+    const n = mergeQuotes(App.state.prices, data.quotes, ACTIVE_PROVIDER.id, data.updatedAt);
     const histChanged = JSON.stringify(data.histories) !== JSON.stringify(App.histories);
     if (histChanged) { App.histories = data.histories; App.saveHistories(); }
     if (n) App.persist();
@@ -1418,6 +1683,14 @@ const App = {
 
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
     document.getElementById('import-file').addEventListener('change', App.importJSON);
+    const auto = document.getElementById('set-autorefresh');
+    auto.checked = App.state.settings.autoRefresh;
+    auto.addEventListener('change', () => {
+      App.state.settings.autoRefresh = auto.checked;
+      App.persist();
+      App.toast(auto.checked ? 'Actualisation automatique activée' : 'Actualisation automatique désactivée');
+    });
+
     document.getElementById('btn-theme').addEventListener('click', () => {
       App.state.theme = App.state.theme === 'dark' ? 'light' : 'dark';
       App.persist();
@@ -1537,6 +1810,8 @@ const App = {
         App.applyTheme();
         App.bindSimulatorValues();
         App.fillPlannerValues();
+        document.getElementById('set-autorefresh').checked = data.settings.autoRefresh;
+        App.liveStatus = {};
         App.renderAll();
         App.toast('Sauvegarde importée');
       } catch (err) {
@@ -1559,5 +1834,5 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', App.init);
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls };
+  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls, Euronext, QuoteError };
 }

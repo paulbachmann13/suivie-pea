@@ -321,3 +321,36 @@ dialog h2 { margin-top: 0; }
 .legend span { display: inline-flex; align-items: center; }
 .key-line { display: inline-block; width: 14px; height: 2px; border-radius: 1px; margin-right: 6px; }
 .key-value { background: var(--series-value); }
+
+/* ---------- Cours d'un titre (Euronext) ---------- */
+.position-name { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.quote-box { padding: 10px 0; border-top: 1px solid var(--border); }
+.quote-main { min-width: 0; }
+.quote-price { display: block; font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.quote-meta { display: block; margin-top: 2px; }
+.btn-live { width: 100%; margin-top: 10px; }
+.quote-error {
+  margin: 0 0 10px; padding: 8px 10px; border-radius: 10px;
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+  color: var(--ink); font-size: 14px;
+}
+
+/* ---------- Interrupteur (réglages) ---------- */
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: var(--tap); margin-bottom: 12px; cursor: pointer;
+}
+.switch-row small { display: block; margin-top: 2px; }
+.switch-row input {
+  -webkit-appearance: none; appearance: none; flex: none;
+  width: 51px; height: 31px; border-radius: 999px; margin: 0;
+  background: var(--surface-2); border: 1px solid var(--border);
+  position: relative; cursor: pointer; transition: background .2s;
+}
+.switch-row input::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 25px; height: 25px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform .2s;
+}
+.switch-row input:checked { background: var(--good); border-color: transparent; }
+.switch-row input:checked::after { transform: translateX(20px); }

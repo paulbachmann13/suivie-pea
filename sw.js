@@ -8,7 +8,7 @@
    - Cours (data/*.json) : réseau d'abord, cache si hors ligne.
    Pensez à incrémenter VERSION (ici et dans app.js) à chaque modification.
    ========================================================================== */
-const VERSION = '1.2.1'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
+const VERSION = '1.3.0'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
 const CACHE = 'suivi-pea-v' + VERSION;
 
 // Chemins relatifs : fonctionne aussi sous https://<user>.github.io/<depot>/

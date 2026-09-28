@@ -56,7 +56,7 @@
       </div>
 
       <h2>Cours actuels</h2>
-      <p class="hint" id="quotes-status">Les cours se mettent à jour automatiquement chaque soir de semaine. Vous pouvez aussi saisir un cours à la main.</p>
+      <p class="hint" id="quotes-status">« Actualiser le cours » récupère le dernier cours sur Euronext. Vous pouvez toujours le corriger à la main.</p>
       <div id="positions" class="stack"></div>
 
       <h2 id="chart-cumul-title">Valeur et versements</h2>
@@ -184,8 +184,14 @@
         <input type="file" id="import-file" class="visually-hidden" accept="application/json,.json,text/plain">
       </div>
 
-      <h2>Affichage</h2>
+      <h2>Réglages</h2>
       <div class="card">
+        <label class="switch-row">
+          <span>Actualiser les cours automatiquement
+            <small class="hint">Une fois par jour, à l'ouverture de l'appli (Euronext).</small>
+          </span>
+          <input type="checkbox" id="set-autorefresh" role="switch">
+        </label>
         <button class="btn btn-block" id="btn-theme">Passer en thème clair</button>
       </div>
       <p class="hint center" id="app-version"></p>
