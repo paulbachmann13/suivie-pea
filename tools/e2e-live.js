@@ -38,7 +38,10 @@ const tickers = tickersArg.length ? tickersArg : ['PSP5', 'FR0011871128'];
   for (const t of tickers) {
     const card = page.locator('#positions .card').filter({ has: page.locator('.position-head strong', { hasText: t.toUpperCase() }) });
     await card.locator('[data-a=live]').click();
-    await page.waitForFunction((el) => !el.disabled, await card.locator('[data-a=live]').elementHandle(), { timeout: 20000 });
+    // La carte est redessinée après la réponse : on relit le bouton à chaque fois
+    for (let i = 0; i < 40 && (await card.locator('[data-a=live]').textContent()).includes('Récupération'); i++) {
+      await page.waitForTimeout(500);
+    }
     const price = await card.locator('[data-f=price]').textContent();
     const meta = await card.locator('[data-f=meta]').textContent();
     const name = await card.locator('[data-f=name]').textContent();
