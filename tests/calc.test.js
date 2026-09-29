@@ -562,3 +562,16 @@ test('import : option « vrais chiffres » du simulateur', () => {
   assert.equal(Store.sanitize({ purchases: [], sim: { useReal: false } }).sim.useReal, false);
   assert.equal(Store.sanitize({ purchases: [] }).sim.useReal, true);
 });
+
+test('plus-value hors frais (style courtier) vs nette de frais', () => {
+  // Cas réel BforBank : 1 part à 59,44 €, 2,50 € de frais, cours 59,46 €
+  const pf = Calc.portfolio(
+    [{ date: '2026-09-28', ticker: 'PSP5', qty: 1, price: 59.44, fees: 2.5 }],
+    { PSP5: { price: 59.46, date: '2026-09-29' } });
+  close(pf.pvGross, 0.02);
+  close(pf.pvGrossPct, 0.02 / 59.44);
+  close(pf.positions[0].pruGross, 59.44);
+  close(pf.pv, 0.02 - 2.5);               // -2,48 €
+  close(pf.pvPct, -2.48 / 61.94);          // -4,00 %
+  close(pf.positions[0].pvGross, 0.02);
+});

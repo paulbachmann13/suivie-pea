@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.4.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.4.2'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -179,6 +179,10 @@ const Calc = {
         value,
         pv,
         pvPct: invested > 0 ? pv / invested : 0,
+        // Style courtier : hors frais (PRU = prix d'achat brut)
+        pruGross: pos.qty > 0 ? pos.gross / pos.qty : 0,
+        pvGross: value - pos.gross,
+        pvGrossPct: pos.gross > 0 ? (value - pos.gross) / pos.gross : 0,
       };
     }).sort((a, b) => b.invested - a.invested);
 
@@ -187,13 +191,17 @@ const Calc = {
     const qty = positions.reduce((s, p) => s + p.qty, 0);
     const fees = positions.reduce((s, p) => s + p.fees, 0);
     const pv = value - invested;
+    const gross = positions.reduce((s, p) => s + p.gross, 0);
     return {
       positions,
       invested,
       value,
       fees,
+      gross,
       pv,
       pvPct: invested > 0 ? pv / invested : 0,
+      pvGross: value - gross,
+      pvGrossPct: gross > 0 ? (value - gross) / gross : 0,
       qty,
       // Un PRU global n'a de sens que pour un seul titre
       pru: positions.length === 1 ? positions[0].pru : null,
@@ -1212,13 +1220,18 @@ const App = {
 
     document.getElementById('kpi-value').textContent = Fmt.eur(pf.value);
     const pvEl = document.getElementById('kpi-pv');
-    pvEl.textContent = `${Fmt.signedEur(pf.pv)} (${Fmt.signedPct(pf.pvPct)})`;
-    pvEl.className = 'hero-delta ' + cls(pf.pv);
+    pvEl.textContent = `${Fmt.signedEur(pf.pvGross)} (${Fmt.signedPct(pf.pvGrossPct)})`;
+    pvEl.className = 'hero-delta ' + cls(pf.pvGross);
+    const netEl = document.getElementById('kpi-net');
+    netEl.textContent = pf.fees > 0
+      ? `Frais ${Fmt.eur(pf.fees)} · nette de frais ${Fmt.signedEur(pf.pv)} (${Fmt.signedPct(pf.pvPct)})`
+      : '';
+    netEl.hidden = !(pf.fees > 0);
     document.getElementById('kpi-invested').textContent = Fmt.eur(pf.invested);
     const pvEur = document.getElementById('kpi-pv-eur');
-    pvEur.textContent = Fmt.signedEur(pf.pv);
-    pvEur.className = 'kpi-value ' + cls(pf.pv);
-    document.getElementById('kpi-pru').textContent = pf.pru !== null ? Fmt.unitPrice(pf.pru) : (pf.positions.length ? 'voir titres' : '—');
+    pvEur.textContent = Fmt.signedEur(pf.pvGross);
+    pvEur.className = 'kpi-value ' + cls(pf.pvGross);
+    document.getElementById('kpi-pru').textContent = pf.positions.length === 1 ? Fmt.unitPrice(pf.positions[0].pruGross) : (pf.positions.length ? 'voir titres' : '—');
     document.getElementById('kpi-qty').textContent = Fmt.num(pf.qty);
 
     // Rendement annualisé (TRI) : n'a de sens qu'après quelques semaines
@@ -1283,14 +1296,15 @@ const App = {
       const card = document.createElement('div');
       card.className = 'card';
       card.innerHTML = `
-        <div class="position-head"><strong></strong><span class="${cls(pos.pv)}"></span></div>
+        <div class="position-head"><strong></strong><span class="${cls(pos.pvGross)}"></span></div>
         <p class="position-name"><span data-f="name"></span><button class="link-btn" type="button" data-a="change">Changer de titre</button></p>
         <div class="position-grid">
           <div>Parts<b data-f="qty"></b></div>
-          <div>PRU<b data-f="pru"></b></div>
+          <div>PRU (hors frais)<b data-f="pru"></b></div>
           <div>Investi<b data-f="invested"></b></div>
           <div>Valeur<b data-f="value"></b></div>
         </div>
+        <p class="hint position-net" data-f="net"></p>
         <div class="quote-box">
           <div class="quote-main">
             <b class="quote-price" data-f="price"></b>
@@ -1319,7 +1333,12 @@ const App = {
       const ins = App.state.instruments[pos.ticker];
       const status = App.liveStatus[pos.ticker] || {};
       card.querySelector('.position-head strong').textContent = pos.ticker;
-      card.querySelector('.position-head span').textContent = `${Fmt.signedEur(pos.pv)} · ${Fmt.signedPct(pos.pvPct)}`;
+      card.querySelector('.position-head span').textContent = `${Fmt.signedEur(pos.pvGross)} · ${Fmt.signedPct(pos.pvGrossPct)}`;
+      const netP = card.querySelector('[data-f=net]');
+      netP.textContent = pos.fees > 0
+        ? `Frais ${Fmt.eur(pos.fees)} · nette de frais ${Fmt.signedEur(pos.pv)} (${Fmt.signedPct(pos.pvPct)}), PRU frais inclus ${Fmt.unitPrice(pos.pru)}`
+        : '';
+      netP.hidden = !(pos.fees > 0);
       const nameEl = card.querySelector('[data-f=name]');
       nameEl.textContent = ins ? `${ins.name}${ins.symbol && ins.symbol !== pos.ticker ? ' · ' + ins.symbol : ''} · ${ins.isin}` : '';
       card.querySelector('.position-name').hidden = !ins;
@@ -1328,7 +1347,7 @@ const App = {
         App.renderDashboard();
       });
       card.querySelector('[data-f=qty]').textContent = Fmt.num(pos.qty);
-      card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pru);
+      card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pruGross);
       card.querySelector('[data-f=invested]').textContent = Fmt.eur(pos.invested);
       card.querySelector('[data-f=value]').textContent = Fmt.eur(pos.value);
       card.querySelector('[data-f=price]').textContent = pos.hasQuote ? Fmt.unitPrice(pos.currentPrice) : '—';

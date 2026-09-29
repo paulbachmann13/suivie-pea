@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=1.4.1">
+  <link rel="stylesheet" href="style.css?v=1.4.2">
 </head>
 <body>
   <header class="topbar">
@@ -44,13 +44,14 @@
         <p class="label">Valeur actuelle</p>
         <p class="hero-value" id="kpi-value">0,00 €</p>
         <p class="hero-delta" id="kpi-pv">+0,00 € (+0,00 %)</p>
+        <p class="hint" id="kpi-net" hidden></p>
         <p class="hint" id="kpi-warning" hidden></p>
       </div>
 
       <div class="kpis">
         <div class="kpi card"><p class="label">Total investi</p><p class="kpi-value" id="kpi-invested">0,00 €</p></div>
-        <div class="kpi card"><p class="label">Plus-value</p><p class="kpi-value" id="kpi-pv-eur">0,00 €</p></div>
-        <div class="kpi card"><p class="label">PRU moyen</p><p class="kpi-value" id="kpi-pru">—</p></div>
+        <div class="kpi card"><p class="label">Plus-value (hors frais)</p><p class="kpi-value" id="kpi-pv-eur">0,00 €</p></div>
+        <div class="kpi card"><p class="label">PRU (hors frais)</p><p class="kpi-value" id="kpi-pru">—</p></div>
         <div class="kpi card"><p class="label">Nombre de parts</p><p class="kpi-value" id="kpi-qty">0</p></div>
         <div class="kpi card"><p class="label">Rendement annualisé</p><p class="kpi-value" id="kpi-xirr">—</p><p class="hint" id="kpi-xirr-hint"></p></div>
         <div class="kpi card" id="kpi-cash-card"><p class="label">Cash disponible</p><p class="kpi-value" id="kpi-cash">—</p><p class="hint" id="kpi-cash-hint"></p></div>
@@ -275,6 +276,6 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="app.js?v=1.4.1"></script>
+  <script src="app.js?v=1.4.2"></script>
 </body>
 </html>
