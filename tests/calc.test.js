@@ -575,3 +575,56 @@ test('plus-value hors frais (style courtier) vs nette de frais', () => {
   close(pf.pvPct, -2.48 / 61.94);          // -4,00 %
   close(pf.positions[0].pvGross, 0.02);
 });
+
+test('série de performance : par titre et total, hors frais', () => {
+  const buys = [
+    { id: 'a', date: '2026-01-05', ticker: 'DCAM', qty: 10, price: 6.0, fees: 1 },
+    { id: 'b', date: '2026-01-06', ticker: 'PSP5', qty: 1, price: 50, fees: 2 },
+  ];
+  const hist = {
+    DCAM: [['2026-01-05', 6.0], ['2026-01-06', 6.6], ['2026-01-07', 5.4]],
+    PSP5: [['2026-01-06', 50], ['2026-01-07', 55]],
+  };
+  const dcam = Calc.performanceSeries(buys, hist, 'DCAM');
+  assert.equal(dcam.length, 3);
+  close(dcam[0].pct, 0);
+  close(dcam[1].pct, 0.10);           // 66 € pour 60 € payés
+  close(dcam[2].pct, -0.10);          // 54 € pour 60 €
+  close(dcam[2].pv, -6);
+  close(dcam[2].pvNet, -7);           // avec 1 € de frais
+  // total : commence au 1er achat, tous les titres doivent avoir un historique
+  const all = Calc.performanceSeries(buys, hist);
+  assert.equal(all[0].date, '2026-01-05');
+  const last = all[all.length - 1];
+  close(last.value, 54 + 55);
+  close(last.gross, 60 + 50);
+  close(last.pct, (109 - 110) / 110);
+  assert.deepEqual(Calc.performanceSeries(buys, { DCAM: hist.DCAM }), [], 'PSP5 sans historique → pas de total');
+  assert.deepEqual(Calc.performanceSeries(buys, hist, 'XXXX'), []);
+});
+
+test('historiques : dernier cours ajouté, fusion', () => {
+  const h = { PSP5: [['2026-09-28', 59.37]] };
+  const w = Calc.withLatestQuotes(h, { PSP5: { price: 59.46, date: '2026-09-29' }, XXX: { price: 1, date: '2026-09-29' } });
+  assert.deepEqual(w.PSP5, [['2026-09-28', 59.37], ['2026-09-29', 59.46]]);
+  assert.equal(w.XXX, undefined, 'sans historique : pas de courbe');
+  assert.deepEqual(h.PSP5, [['2026-09-28', 59.37]], 'entrée non modifiée');
+  assert.deepEqual(
+    Calc.mergeHistory([['2026-01-01', 1], ['2026-01-03', 3]], [['2026-01-02', 2], ['2026-01-03', 3.5]]),
+    [['2026-01-01', 1], ['2026-01-02', 2], ['2026-01-03', 3.5]]);
+});
+
+test('Euronext : historique depuis le premier achat', async () => {
+  const urls = [];
+  const f = async (url) => {
+    urls.push(url);
+    return { ok: true, status: 200, text: async () => url.includes('instrumentSearch') ? FIX('euronext-search-psp5.json') : FIX('euronext-history-psp5.csv') };
+  };
+  const q = await Euronext.quote('PSP5', null, f, '2026-09-28');
+  assert.equal(q.price, 59.37);
+  assert.ok(q.history.length >= 1);
+  assert.deepEqual(q.history[q.history.length - 1], ['2026-09-28', 59.37]);
+  assert.ok(/startdate=2026-09-2[01]/.test(urls[urls.length - 1]) || /startdate=2026-09-1/.test(urls[urls.length - 1]), 'démarre avant le 1er achat : ' + urls[urls.length - 1]);
+  // sans `since` : pas d'historique (comportement d'avant)
+  assert.deepEqual((await Euronext.quote('PSP5', null, f)).history, []);
+});

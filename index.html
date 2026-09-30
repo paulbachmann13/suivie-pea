@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=1.4.2">
+  <link rel="stylesheet" href="style.css?v=1.4.3">
 </head>
 <body>
   <header class="topbar">
@@ -60,6 +60,12 @@
       <h2>Cours actuels</h2>
       <p class="hint" id="quotes-status">« Actualiser le cours » récupère le dernier cours sur Euronext. Vous pouvez toujours le corriger à la main.</p>
       <div id="positions" class="stack"></div>
+
+      <h2 id="chart-perf-title">Ma performance <span class="perf-now" id="chart-perf-now"></span></h2>
+      <div class="card chart-card" id="chart-perf-card">
+        <div id="chart-perf" class="chart" role="img" aria-label="Performance totale du portefeuille depuis le premier achat"></div>
+        <p class="hint" id="chart-perf-hint" hidden></p>
+      </div>
 
       <h2 id="chart-cumul-title">Valeur et versements</h2>
       <div class="card chart-card">
@@ -276,6 +282,6 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="app.js?v=1.4.2"></script>
+  <script src="app.js?v=1.4.3"></script>
 </body>
 </html>

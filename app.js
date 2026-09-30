@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.4.2'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.4.3'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -410,11 +410,13 @@ const Calc = {
     const qty = Object.fromEntries(tickers.map((t) => [t, 0]));
     let pi = 0;
     let invested = 0;
+    let gross = 0; // hors frais
     for (const d of dates) {
       while (pi < sorted.length && sorted[pi].date <= d) {
         const p = sorted[pi++];
         qty[Calc.normTicker(p.ticker)] += p.qty;
         invested += Calc.purchaseCost(p);
+        gross += p.qty * p.price;
       }
       let value = 0;
       let ok = true;
@@ -426,9 +428,52 @@ const Calc = {
           value += qty[t] * h[idx[t]][1];
         }
       }
-      if (ok) out.push({ date: d, invested, value });
+      if (ok) out.push({ date: d, invested, gross, value });
     }
     return out;
+  },
+
+  /**
+   * Performance personnelle dans le temps : plus-value latente (hors frais,
+   * comme le courtier) rapportée à ce qui a été payé pour les parts détenues
+   * à chaque date. ticker = un seul titre, null = tout le portefeuille
+   * (alors chaque titre détenu doit avoir un historique, sinon []).
+   * @returns [{date, gross, invested, value, pv, pct, pvNet, pctNet}]
+   */
+  performanceSeries(purchases, histories, ticker = null) {
+    const subset = ticker ? purchases.filter((p) => Calc.normTicker(p.ticker) === ticker) : purchases;
+    return Calc.valueSeries(subset, histories).map((pt) => ({
+      ...pt,
+      pv: pt.value - pt.gross,
+      pct: pt.gross > 0 ? (pt.value - pt.gross) / pt.gross : 0,
+      pvNet: pt.value - pt.invested,
+      pctNet: pt.invested > 0 ? (pt.value - pt.invested) / pt.invested : 0,
+    }));
+  },
+
+  /**
+   * Historiques + dernier cours connu (Euronext ou saisi) ajouté comme dernier
+   * point s'il est plus récent : la courbe finit sur le chiffre de la carte.
+   */
+  withLatestQuotes(histories, prices) {
+    const out = {};
+    for (const [t, h] of Object.entries(histories || {})) out[t] = h;
+    for (const [t, q] of Object.entries(prices || {})) {
+      if (!(q && q.price > 0 && q.date)) continue;
+      const h = out[t];
+      if (!h || !h.length) continue; // pas d'historique : pas de courbe
+      const last = h[h.length - 1];
+      if (q.date > last[0]) out[t] = [...h, [q.date, q.price]];
+      else if (q.date === last[0] && q.price !== last[1]) out[t] = [...h.slice(0, -1), [q.date, q.price]];
+    }
+    return out;
+  },
+
+  /** Fusionne deux historiques [[date, clôture]] : la source `b` l'emporte à date égale. */
+  mergeHistory(a = [], b = []) {
+    const m = new Map(a.map((h) => [h[0], h[1]]));
+    for (const h of b) m.set(h[0], h[1]);
+    return [...m.entries()].sort((x, y) => x[0].localeCompare(y[0]));
   },
 };
 
@@ -834,6 +879,15 @@ const Euronext = {
    */
   parseHistoryCsv(text) {
     let best = null;
+    for (const [date, price] of Euronext.parseHistoryRows(text)) {
+      if (!best || date > best.date) best = { date, price };
+    }
+    return best;
+  },
+
+  /** Toutes les séances du CSV : [['AAAA-MM-JJ', clôture], ...] triées par date. */
+  parseHistoryRows(text) {
+    const rows = [];
     for (const line of String(text || '').split(/\r?\n/)) {
       const cols = line.replace(/^\uFEFF/, '').split(';');
       const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((cols[0] || '').trim());
@@ -842,9 +896,9 @@ const Euronext = {
       const close = parseFloat(cols[5]);
       const last = parseFloat(cols[4]);
       const price = close > 0 ? close : last > 0 ? last : NaN;
-      if (Dates.isValidISO(date) && price > 0 && (!best || date > best.date)) best = { date, price };
+      if (Dates.isValidISO(date) && price > 0) rows.push([date, price]);
     }
-    return best;
+    return rows.sort((a, b) => a[0].localeCompare(b[0]));
   },
 
   /** Recherche Euronext : candidats de la première variante qui donne des résultats. */
@@ -874,9 +928,18 @@ const Euronext = {
     throw err;
   },
 
-  /** Dernier cours d'un instrument (séances des 15 derniers jours). */
-  async lastPrice(ins, fetchFn = fetch, today = new Date()) {
-    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 15);
+  /**
+   * Dernier cours d'un instrument (séances des 15 derniers jours) et, si
+   * `since` est donné ('AAAA-MM-JJ'), tout l'historique depuis cette date
+   * (pour la courbe de performance).
+   */
+  async lastPrice(ins, fetchFn = fetch, today = new Date(), since = null) {
+    let start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 15);
+    if (since && Dates.isValidISO(since)) {
+      const from = Dates.parse(since);
+      from.setDate(from.getDate() - 7); // marge : l'achat peut tomber un week-end ou un jour férié
+      if (from < start) start = from;
+    }
     const url = `${Euronext.BASE}/en/ajax/AwlHistoricalPrice/getFullDownloadAjax/${ins.isin}-${ins.mic}` +
       `?format=csv&decimal_separator=.&date_form=d/m/Y&op=&adjusted=Y&base100=` +
       `&startdate=${Dates.toISO(start)}&enddate=${Dates.toISO(today)}`;
@@ -884,25 +947,26 @@ const Euronext = {
     if (!/Date;/.test(text)) throw new QuoteError('format', 'historique : ' + text.slice(0, 60));
     const last = Euronext.parseHistoryCsv(text);
     if (!last) throw new QuoteError('noprice');
-    return last;
+    return { ...last, history: since ? Euronext.parseHistoryRows(text) : [] };
   },
 
   /**
    * Cours actuel d'un titre suivi.
    * @param ticker  ticker (PSP5) ou ISIN (FR0011871128)
    * @param known   instrument déjà résolu (évite une recherche)
-   * @returns {{price, date, at, instrument}}
+   * @param since   'AAAA-MM-JJ' : rapatrie aussi l'historique depuis cette date
+   * @returns {{price, date, at, instrument, history}}
    */
-  async quote(ticker, known = null, fetchFn = fetch) {
+  async quote(ticker, known = null, fetchFn = fetch, since = null) {
     let ins = known && Euronext.validIsin(known.isin) ? known : await Euronext.resolve(ticker, fetchFn);
     let last;
     try {
-      last = await Euronext.lastPrice(ins, fetchFn);
+      last = await Euronext.lastPrice(ins, fetchFn, new Date(), since);
     } catch (e) {
       // Instrument mémorisé qui ne répond plus (radiation, changement de place…) : nouvelle recherche
       if (!known || !(e instanceof QuoteError) || !['notfound', 'noprice', 'server'].includes(e.code)) throw e;
       ins = await Euronext.resolve(ticker, fetchFn);
-      last = await Euronext.lastPrice(ins, fetchFn);
+      last = await Euronext.lastPrice(ins, fetchFn, new Date(), since);
     }
     return { ...last, at: new Date().toISOString(), instrument: ins };
   },
@@ -940,7 +1004,7 @@ function niceTicks(max, count = 4) {
 }
 
 function drawChart(container, opts) {
-  const { xs, series, xLabel, yFormat, step = false, stacked = false, emptyText = 'Pas encore de données' } = opts;
+  const { xs, series, xLabel, yFormat, tickFormat = Fmt.compactEur, step = false, stacked = false, emptyText = 'Pas encore de données' } = opts;
   container.innerHTML = '';
   const W = container.clientWidth || 320;
   const H = container.clientHeight || 220;
@@ -957,20 +1021,37 @@ function drawChart(container, opts) {
   series.forEach((s, si) => {
     shown[si] = s.values.map((v, i) => (stacked && si > 0 ? shown[si - 1][i] + v : v));
   });
-  const yMax = Math.max(...shown.flat(), 1);
-  const ticks = niceTicks(yMax);
-  const top = ticks[ticks.length - 1];
+  const flat = shown.flat();
+  // Valeurs négatives (performance) : l'axe descend sous le zéro ; sinon il part de 0
+  const signed = opts.signed === true;
+  const yMax = signed ? Math.max(...flat, 0.0001) : Math.max(...flat, 1);
+  const yMin = signed ? Math.min(...flat, 0) : 0;
+  let ticks, top, bottom;
+  if (signed && yMin < 0) {
+    // même pas au-dessus et au-dessous de zéro
+    const raw = (yMax - yMin) / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 2.5, 5, 10].map((k) => k * mag).find((v) => v >= raw);
+    bottom = Math.floor(yMin / step - 1e-9) * step;
+    top = Math.ceil(yMax / step - 1e-9) * step;
+    ticks = [];
+    for (let v = bottom; v <= top + step * 0.001; v += step) ticks.push(Math.abs(v) < step * 1e-6 ? 0 : v);
+  } else {
+    ticks = niceTicks(yMax);
+    top = ticks[ticks.length - 1];
+    bottom = 0;
+  }
 
   const x0 = xs[0];
   const x1 = xs.length > 1 ? xs[xs.length - 1] : xs[0] + 1;
   const sx = (x) => m.left + ((x - x0) / (x1 - x0)) * (W - m.left - m.right);
-  const sy = (y) => H - m.bottom - (y / top) * (H - m.top - m.bottom);
+  const sy = (y) => H - m.bottom - ((y - bottom) / (top - bottom)) * (H - m.top - m.bottom);
 
   // Quadrillage + axe Y
   const grid = svgEl('g', { class: 'grid' }, svg);
   ticks.forEach((t) => {
-    if (t > 0) svgEl('line', { x1: m.left, x2: W - m.right, y1: sy(t), y2: sy(t) }, grid);
-    svgEl('text', { x: m.left - 6, y: sy(t) + 4, 'text-anchor': 'end', class: 'tick' }, svg).textContent = Fmt.compactEur(t);
+    if (t !== 0) svgEl('line', { x1: m.left, x2: W - m.right, y1: sy(t), y2: sy(t) }, grid);
+    svgEl('text', { x: m.left - 6, y: sy(t) + 4, 'text-anchor': 'end', class: 'tick' }, svg).textContent = tickFormat(t);
   });
   svgEl('line', { x1: m.left, x2: W - m.right, y1: sy(0), y2: sy(0), class: 'baseline' }, svg);
 
@@ -1210,6 +1291,7 @@ const App = {
 
   renderCharts() {
     App.renderCumulChart();
+    App.renderPerfCharts();
     App.renderSimChart();
   },
 
@@ -1305,6 +1387,11 @@ const App = {
           <div>Valeur<b data-f="value"></b></div>
         </div>
         <p class="hint position-net" data-f="net"></p>
+        <div class="perf-box">
+          <p class="label">Ma performance</p>
+          <div class="chart chart-small" data-f="perf" role="img"></div>
+          <p class="hint" data-f="perf-hint" hidden></p>
+        </div>
         <div class="quote-box">
           <div class="quote-main">
             <b class="quote-price" data-f="price"></b>
@@ -1333,6 +1420,7 @@ const App = {
       const ins = App.state.instruments[pos.ticker];
       const status = App.liveStatus[pos.ticker] || {};
       card.querySelector('.position-head strong').textContent = pos.ticker;
+      card.querySelector('[data-f=perf]').dataset.ticker = pos.ticker;
       card.querySelector('.position-head span').textContent = `${Fmt.signedEur(pos.pvGross)} · ${Fmt.signedPct(pos.pvGrossPct)}`;
       const netP = card.querySelector('[data-f=net]');
       netP.textContent = pos.fees > 0
@@ -1420,6 +1508,7 @@ const App = {
     all.disabled = Object.values(App.liveStatus).some((st) => st.loading);
     all.addEventListener('click', () => App.refreshAllLive({ silent: false, force: true }));
     box.appendChild(all);
+    App.renderPerfCharts(); // les cartes viennent d'être recréées
   },
 
   /** Texte sous le prix : séance, date et heure de mise à jour, source. */
@@ -1463,7 +1552,7 @@ const App = {
     App.renderDashboard();
     try {
       const known = query ? null : App.state.instruments[ticker];
-      const q = await Euronext.quote(query || ticker, known);
+      const q = await Euronext.quote(query || ticker, known, fetch, App.firstPurchaseDate(ticker));
       // Un code saisi par l'utilisateur vaut confirmation du titre
       App.state.instruments[ticker] = { ...q.instrument, confirmed: !!(query || (known && known.confirmed)) };
       const cur = App.state.prices[ticker];
@@ -1471,6 +1560,11 @@ const App = {
         App.state.prices[ticker] = { price: q.price, date: q.date, source: 'euronext', at: q.at };
       }
       App.liveStatus[ticker] = {};
+      // Historique des cours depuis le 1er achat : sert à la courbe de performance
+      if (q.history && q.history.length) {
+        App.histories[ticker] = Calc.mergeHistory(App.histories[ticker], q.history);
+        App.saveHistories();
+      }
       App.persist();
       if (announce) App.toast(`${ticker} : ${Fmt.unitPrice(q.price)} (séance du ${Fmt.date(q.date)})`);
       return true;
@@ -1488,6 +1582,12 @@ const App = {
     } finally {
       App.renderAll();
     }
+  },
+
+  /** Date du premier achat d'un titre ('AAAA-MM-JJ'), null s'il n'y en a pas. */
+  firstPurchaseDate(ticker) {
+    const dates = App.state.purchases.filter((p) => Calc.normTicker(p.ticker) === ticker).map((p) => p.date).sort();
+    return dates[0] || null;
   },
 
   /** L'utilisateur a choisi le bon titre dans la liste : on le retient et on récupère le cours. */
@@ -1531,8 +1631,11 @@ const App = {
       return false;
     }
     const n = mergeQuotes(App.state.prices, data.quotes, ACTIVE_PROVIDER.id, data.updatedAt);
-    const histChanged = JSON.stringify(data.histories) !== JSON.stringify(App.histories);
-    if (histChanged) { App.histories = data.histories; App.saveHistories(); }
+    // Par titre : l'historique de la GitHub Action remplace celui du même titre, sans effacer
+    // ceux rapatriés depuis Euronext (titres que la GitHub Action ne suit pas)
+    const merged = { ...App.histories, ...data.histories };
+    const histChanged = JSON.stringify(merged) !== JSON.stringify(App.histories);
+    if (histChanged) { App.histories = merged; App.saveHistories(); }
     if (n) App.persist();
     if (n || histChanged) App.renderAll();
     if (!silent) App.toast(n ? `${n} cours mis à jour` : 'Cours déjà à jour');
@@ -1578,6 +1681,74 @@ const App = {
       step: true,
       emptyText: 'Ajoutez un achat pour voir la courbe',
     });
+  },
+
+  /**
+   * Courbe de performance personnelle : plus-value latente en % (hors frais,
+   * comme la carte du titre), jour par jour depuis le premier achat.
+   * Un graphique par titre + un pour le total.
+   */
+  perfChartOpts(ps, ariaLabel) {
+    const up = ps[ps.length - 1].pct >= 0;
+    const color = up ? '--good' : '--bad';
+    return {
+      signed: true,
+      xs: ps.map((p) => Dates.parse(p.date).getTime()),
+      series: [{ name: 'Performance', color, values: ps.map((p) => p.pct), area: true }],
+      xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+      tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+      tooltipRows: (i) => [
+        { name: 'Performance', color, value: Fmt.signedPct(ps[i].pct) },
+        { name: 'Plus-value', value: Fmt.signedEur(ps[i].pv) },
+        { name: 'Valeur', value: Fmt.eur(ps[i].value) },
+        { name: 'Investi (hors frais)', value: Fmt.eur(ps[i].gross) },
+      ],
+      yFormat: Fmt.signedPct,
+      tickFormat: (v) => (v > 0 ? '+' : '') + String(Math.round(v * 10000) / 100).replace('.', ',') + ' %',
+      ariaLabel,
+    };
+  },
+
+  renderPerfCharts() {
+    if (document.getElementById('view-dashboard').hidden) return; // vue masquée : pas de largeur à mesurer
+    const hist = Calc.withLatestQuotes(App.histories, App.state.prices);
+    const purchases = App.state.purchases;
+
+    // Un graphique par titre
+    document.querySelectorAll('#positions [data-f=perf]').forEach((el) => {
+      const ticker = el.dataset.ticker;
+      const hint = el.parentElement.querySelector('[data-f=perf-hint]');
+      const ps = Calc.performanceSeries(purchases, hist, ticker);
+      el.hidden = ps.length < 2;
+      hint.hidden = ps.length >= 2;
+      if (ps.length < 2) {
+        el.replaceChildren();
+        hint.textContent = App.histories[ticker] && App.histories[ticker].length
+          ? 'La courbe apparaît à partir du 2e jour de cotation après votre premier achat.'
+          : 'Touchez « Actualiser le cours » pour charger l\'historique et afficher la courbe.';
+        return;
+      }
+      const o = App.perfChartOpts(ps);
+      el.setAttribute('aria-label', `Performance de ${ticker} depuis le premier achat`);
+      drawChart(el, o);
+    });
+
+    // Total du portefeuille
+    const el = document.getElementById('chart-perf');
+    if (!el) return;
+    const ps = Calc.performanceSeries(purchases, hist);
+    const hint = document.getElementById('chart-perf-hint');
+    el.hidden = ps.length < 2;
+    hint.hidden = ps.length >= 2 || !purchases.length;
+    if (ps.length < 2) {
+      el.replaceChildren();
+      hint.textContent = 'Actualisez les cours de chaque titre pour charger leur historique : la courbe s\'affichera ensuite.';
+      return;
+    }
+    const last = ps[ps.length - 1];
+    document.getElementById('chart-perf-now').textContent = `${Fmt.signedPct(last.pct)} · ${Fmt.signedEur(last.pv)}`;
+    document.getElementById('chart-perf-now').className = 'perf-now ' + Fmt.trend(last.pv);
+    drawChart(el, App.perfChartOpts(ps));
   },
 
   /* ---------- Achats ---------- */

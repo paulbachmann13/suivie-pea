@@ -10,6 +10,7 @@ const path = require('path');
 // Ticker affiché dans l'appli → symbole Yahoo Finance
 const SYMBOLS = {
   DCAM: 'DCAM.PA', // Amundi PEA Monde (MSCI World) — FR001400U5Q4
+  PSP5: 'PSP5.PA', // Amundi PEA S&P 500 — FR0011871128
 };
 const RANGE = '5y';           // profondeur d'historique
 const OUT = path.join(__dirname, '..', 'data', 'prices.json');
