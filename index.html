@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=1.4.3">
+  <link rel="stylesheet" href="style.css?v=1.5.0">
 </head>
 <body>
   <header class="topbar">
@@ -168,6 +168,33 @@
       <div class="card chart-card">
         <div id="chart-sim" class="chart" role="img" aria-label="Projection du capital"></div>
       </div>
+      <!-- Argent fictif : un seul versement, rien n'est enregistré -->
+      <form id="whatif-form" class="card form" autocomplete="off">
+        <h2 class="card-title">Et si je plaçais de l'argent fictif ?</h2>
+        <div class="row">
+          <label>Montant placé (€)
+            <input name="amount" inputmode="decimal" type="text" value="10000" required>
+          </label>
+          <label>Au bout de
+            <input name="duration" inputmode="numeric" type="text" value="1" required>
+          </label>
+          <label>Unité
+            <select name="unit">
+              <option value="months">mois</option>
+              <option value="years">ans</option>
+            </select>
+          </label>
+        </div>
+        <p class="error" id="whatif-error" hidden></p>
+        <div id="whatif-result" hidden>
+          <p class="label" id="whatif-label" style="margin-top:16px"></p>
+          <p class="hero-value" id="whatif-final"></p>
+          <p class="hero-delta" id="whatif-gain"></p>
+          <div class="whatif-table" id="whatif-table"></div>
+        </div>
+        <p class="hint">Un seul versement, aucun achat réel : rien n'est enregistré. Rendement et frais repris des réglages ci-dessus. Sur un mois, la bourse peut varier de plusieurs % dans un sens ou dans l'autre : le résultat réel peut être très différent de cette moyenne.</p>
+      </form>
+
       <p class="hint">Simulation indicative : rendement constant, versements en fin de mois, hors fiscalité. Les performances passées ne préjugent pas des performances futures.</p>
     </section>
 
@@ -282,6 +309,6 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="app.js?v=1.4.3"></script>
+  <script src="app.js?v=1.5.0"></script>
 </body>
 </html>

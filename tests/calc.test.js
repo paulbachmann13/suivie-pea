@@ -628,3 +628,23 @@ test('Euronext : historique depuis le premier achat', async () => {
   // sans `since` : pas d'historique (comportement d'avant)
   assert.deepEqual((await Euronext.quote('PSP5', null, f)).history, []);
 });
+
+test('et si : placement fictif unique (10 000 € sur 1 mois, 1 an, 10 ans)', () => {
+  const rows = Calc.whatIf({ amount: 10000, annualRate: 5, ter: 0, months: [1, 12, 120] });
+  assert.equal(rows.length, 3);
+  // 5 %/an → taux mensuel équivalent 1,05^(1/12) − 1
+  close(rows[0].value, 10000 * Math.pow(1.05, 1 / 12));
+  close(rows[1].value, 10500);
+  close(rows[2].value, 10000 * Math.pow(1.05, 10));
+  close(rows[1].gain, 500);
+  close(rows[1].gainPct, 0.05);
+});
+
+test('et si : taux nul, frais ETF et montant nul', () => {
+  close(Calc.whatIf({ amount: 10000, annualRate: 0, months: [6] })[0].gain, 0);
+  const withTer = Calc.whatIf({ amount: 1000, annualRate: 7, ter: 0.2, months: [120] })[0];
+  close(withTer.value, 1000 * Math.pow(1.07 * 0.998, 10));
+  const zero = Calc.whatIf({ amount: 0, annualRate: 7, months: [12] })[0];
+  assert.equal(zero.value, 0);
+  assert.equal(zero.gainPct, 0);
+});

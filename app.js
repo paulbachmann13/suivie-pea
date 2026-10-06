@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.4.3'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '1.5.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -261,6 +261,18 @@ const Calc = {
       monthlyRate: i,
       points,
     };
+  },
+
+  /**
+   * « Et si je plaçais X € ? » (argent fictif, un seul versement, rien d'enregistré).
+   * Valeur du placement après chacune des durées demandées (en mois).
+   * @returns {{months, value, gain, gainPct}[]}
+   */
+  whatIf({ amount = 0, annualRate = 0, ter = 0, months = [] }) {
+    return months.map((m) => {
+      const r = Calc.simulate({ monthly: 0, annualRate, years: m / 12, initial: amount, ter });
+      return { months: m, value: r.final, gain: r.gains, gainPct: amount > 0 ? r.gains / amount : 0 };
+    });
   },
 
   /**
@@ -1963,6 +1975,65 @@ const App = {
       App.renderSimulator();
       App.renderSimChart();
     }, 200));
+
+    // « Et si je plaçais de l'argent fictif ? » : rien n'est enregistré
+    const wi = document.getElementById('whatif-form');
+    wi.addEventListener('submit', (e) => e.preventDefault());
+    wi.addEventListener('input', App.debounce(() => App.renderWhatIf(), 150));
+    wi.addEventListener('change', () => App.renderWhatIf());
+  },
+
+  /** Durée lisible : 1 → « 1 mois », 18 → « 1 an 6 mois », 120 → « 10 ans ». */
+  fmtMonths(m) {
+    const y = Math.floor(m / 12);
+    const r = m % 12;
+    const ys = y ? `${y} an${y > 1 ? 's' : ''}` : '';
+    const rs = r ? `${r} mois` : '';
+    return [ys, rs].filter(Boolean).join(' ');
+  },
+
+  /** Placement fictif d'un seul versement : valeur finale + jalons (1 mois à 20 ans). */
+  renderWhatIf() {
+    const form = document.getElementById('whatif-form');
+    const err = document.getElementById('whatif-error');
+    const out = document.getElementById('whatif-result');
+    const amount = Calc.parseNumber(form.amount.value, true);
+    const dur = Calc.parseNumber(form.duration.value);
+    const months = Math.round(dur * (form.unit.value === 'years' ? 12 : 1));
+    const bad = [];
+    if (!Calc.validSim('initial', amount) || amount > 1e9) bad.push('Montant');
+    if (!Number.isFinite(months) || months < 1 || months > 960) bad.push('Durée (1 mois à 80 ans)');
+    err.hidden = !bad.length;
+    err.textContent = bad.length ? `À corriger : ${bad.join(', ')}.` : '';
+    out.hidden = !!bad.length;
+    if (bad.length) return;
+
+    const s = App.state.sim;
+    const marks = [...new Set([1, 3, 6, 12, 60, 120, 240, months])].sort((a, b) => a - b);
+    const rows = Calc.whatIf({ amount, annualRate: s.rate, ter: s.ter, months: marks });
+    const main = rows.find((r) => r.months === months);
+
+    document.getElementById('whatif-label').textContent =
+      `${Fmt.eur0(amount)} placés, valeur au bout de ${App.fmtMonths(months)}`;
+    document.getElementById('whatif-final').textContent = Fmt.eur(main.value);
+    const gain = document.getElementById('whatif-gain');
+    gain.textContent = `${Fmt.signedEur(main.gain)} (${Fmt.signedPct(main.gainPct)}) à ${Fmt.num(s.rate)} %/an, frais ${Fmt.num(s.ter)} %`;
+    gain.className = 'hero-delta ' + Fmt.trend(main.gain);
+
+    const table = document.getElementById('whatif-table');
+    table.replaceChildren();
+    const addRow = (cells, cls, strong) => {
+      const row = document.createElement('div');
+      if (cls) row.className = cls;
+      for (const c of cells) {
+        const span = document.createElement(strong ? 'strong' : 'span');
+        span.textContent = c;
+        row.appendChild(span);
+      }
+      table.appendChild(row);
+    };
+    addRow(['Après', 'Valeur', 'Gain'], 'head', false);
+    for (const r of rows) addRow([App.fmtMonths(r.months), Fmt.eur(r.value), Fmt.signedEur(r.gain)], '', r.months === months);
   },
 
   /**
@@ -2008,6 +2079,7 @@ const App = {
     document.getElementById('sim-share').textContent = r.gains >= 0
       ? `Les gains représentent ${Fmt.pct(r.gainsShare)} du capital final (×${Fmt.num(Math.round((r.final / (r.invested || 1)) * 100) / 100)} vos versements).`
       : 'Rendement net négatif : le capital final est inférieur aux versements.';
+    App.renderWhatIf();
   },
 
   /** En mode « vrais chiffres », affiche les valeurs calculées dans les champs (non modifiables). */

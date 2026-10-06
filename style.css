@@ -176,7 +176,24 @@ input[type="text"], input[type="date"] {
   -webkit-appearance: none;
   appearance: none;
 }
-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+select {
+  display: block;
+  width: 100%;
+  min-height: var(--tap);
+  margin-top: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 17px;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.whatif-table { margin-top: 12px; font-size: 14px; }
+.whatif-table > div { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.whatif-table > div > :not(:first-child) { text-align: right; }
+.whatif-table .head { color: var(--muted); font-size: 13px; border-top: 0; }
 .row { display: flex; gap: 12px; }
 .form .row > label { margin-top: 0; } /* champs côte à côte alignés */
 .form .row { align-items: flex-end; }
